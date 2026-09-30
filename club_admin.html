@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Забавни команди • ИТ клуб</title>
+<style>
+:root{color-scheme:dark;--bg:#0c1223;--panel:#161f34;--line:#2b3650;--muted:#a6b2cd;--ink:#edf1fb;--accent:#a99bff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top left,#202047,var(--bg) 65%);color:var(--ink);font:15px/1.55 system-ui,sans-serif;min-height:100vh}
+main{max-width:1180px;margin:auto;padding:28px 24px 64px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+header,.row,.toolbar,.actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap}header{justify-content:space-between;margin-bottom:32px}
+.eyebrow{font-size:12px;letter-spacing:.16em;color:var(--accent);font-weight:700}h1{font-size:clamp(28px,4vw,40px);line-height:1.15;margin:12px 0}h2{font-size:20px;margin:0}p{margin:8px 0;color:var(--muted)}
+button,input,select,textarea{font:inherit}button,.button{padding:10px 16px;border:1px solid var(--line);background:#202a43;color:var(--ink);border-radius:10px;cursor:pointer;font-weight:600}
+button:hover,.button:hover{border-color:var(--accent);text-decoration:none}button:disabled{opacity:.45;cursor:default}.primary{background:#ad9cff;color:#17102f;border-color:#ad9cff}.danger{color:#ffb0be}
+input,select,textarea{padding:10px 12px;background:#0e172a;border:1px solid #38445f;color:var(--ink);border-radius:9px;max-width:100%}textarea{width:100%;resize:vertical;min-height:106px;line-height:1.6}
+input:focus,select:focus,textarea:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}input[type=checkbox]{width:18px;height:18px;accent-color:#ae9cff}
+label{display:block}label>span{display:block;margin-bottom:6px;font-size:13px;color:var(--muted)}.check{display:flex;align-items:center;gap:10px}.check span{margin:0;color:var(--ink);font-size:15px}
+.tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);padding-bottom:14px;margin:26px 0}.tabs button{background:transparent}.tabs button[aria-selected=true]{background:#3c315c;border-color:#9b87dd}
+.card{background:linear-gradient(120deg,#1b2540,var(--panel));border:1px solid var(--line);border-radius:16px;padding:24px;margin:16px 0;box-shadow:0 12px 32px #0002}.card p:last-child{margin-bottom:0}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.two{grid-template-columns:repeat(2,minmax(0,1fr))}.grid input:not([type=checkbox]){width:100%}
+.phrase textarea{margin:16px 0 10px}.phrase .actions{justify-content:space-between}.tag{display:inline-block;font-size:12px;line-height:1.5;background:#333052;color:#d6caff;padding:4px 10px;border-radius:99px}
+.muted,small{color:var(--muted)}.small{font-size:13px}.spacer{flex:1}.toolbar{justify-content:space-between}.notice{border:1px solid #534b75;background:#27243f;padding:12px 16px;border-radius:10px;color:#d7d0ee}
+#status{position:sticky;top:12px;z-index:10;margin:10px 0;padding:12px 16px;border:1px solid #527c67;border-radius:10px;background:#18392d;box-shadow:0 6px 30px #0007}#status.error{background:#492232;border-color:#b95e75}
+[hidden]{display:none!important}.table-wrap{overflow:auto;margin-top:20px}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;white-space:nowrap;color:var(--muted);font-weight:500}td,th{padding:14px 12px;border-bottom:1px solid var(--line);vertical-align:top}td{min-width:120px}td:nth-child(4){min-width:230px;max-width:370px;overflow-wrap:anywhere;white-space:pre-wrap}
+.success{color:#a7e5bb}.failed,.blocked{color:#ffb0be}.stopped,.interrupted{color:#f6d68c}.running{color:#b9c0ff}.empty{text-align:center;padding:35px;color:var(--muted)}footer{margin-top:28px;color:var(--muted);font-size:12px}
+@media(max-width:720px){main{padding:20px 14px 45px}.card{padding:18px}.grid,.two{grid-template-columns:1fr}.tabs{gap:5px}.tabs button{padding:9px 10px}.toolbar>*{max-width:100%}}
+</style>
+</head>
+<body><main>
+<header><a href="../">← Сбирки и известия</a><div class="row"><span class="muted small">Админ панел · ИТ клуб</span><button id="logout" type="button">Изход</button></div></header>
+<div class="eyebrow">ИТ КЛУБ / DISCORD</div>
+<h1>Думата е на бота.</h1>
+<p>Твоите реплики, твоите настройки. Всичко използвано — в историята.</p>
+<div id="status" role="status" aria-live="polite" hidden></div>
+<nav class="tabs" role="tablist" aria-label="Управление на бота">
+<button id="tab-phrases" role="tab" aria-controls="phrases" aria-selected="true" data-tab="phrases">Реплики</button>
+<button id="tab-settings" role="tab" aria-controls="settings" aria-selected="false" data-tab="settings">Настройки</button>
+<button id="tab-history" role="tab" aria-controls="history" aria-selected="false" data-tab="history">История</button>
+</nav>
+<section id="phrases" role="tabpanel" aria-labelledby="tab-phrases">
+<div class="toolbar"><div><h2>Репертоарът на бота</h2><p id="phrase-count">Зареждане…</p></div>
+<label><span>Показвай</span><select id="phrase-filter"><option value="">Всички реплики</option value="roast">Псувни и закачки</option><option value="scammer">Телефонни пародии</option></select></label></div>
+<details class="card"><summary>＋ Добави нова реплика</summary><form id="new-phrase" style="margin-top:18px">
+<div class="row"><label><span>Категория</span><select name="kind"><option value="roast">Псувня / закачка</option><option value="scammer">Телефонна пародия</option></select></label>
+<label><span>Език на гласа</span><select name="language"><option value="bg">Български</option><option value="en">Английски</option></select></label></div>
+<label style="margin-top:14px"><span>Реплика · до 1000 знака</span><textarea name="text" maxlength="1000" required placeholder="Какво да каже ботът?"></textarea></label>
+<div class="row" style="margin-top:12px"><label class="check"><input type="checkbox" name="enabled" checked><span>Активна</span></label><span class="spacer"></span><button class="primary">Добави реплика</button></div>
+</form></details>
+<p class="small">Псувните се използват от /psuvai и /voice_psuvai. Телефонните пародии — от /scammer. Гласовите реплики се отрязват след 35 секунди.</p>
+<div id="phrase-list"></div>
+</section>
+<section id="settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+<h2>Как да се държи ботът</h2><p>Запазените промени важат за следващите команди. /stop остава достъпна.</p>
+<form id="settings-form">
+<div class="card"><div class="grid">
+<label class="check"><input name="enabled" type="checkbox"><span>Забавни команди</span></label>
+<label class="check"><input name="voice_enabled" type="checkbox"><span>Гласови команди</span></label>
+<label class="check"><input name="allow_everyone" type="checkbox"><span>Разреши @everyone</span></label></div>
+<p class="small" style="margin-top:18px">Масовото тагване винаги изисква администратор на сървъра и съответното право на бота в Discord.</p></div>
+<div class="card"><h2>Пауза между командите</h2><p>Обща за всички участници в сървъра, в секунди.</p><div class="grid" style="margin-top:16px">
+<label><span>Текст · 5–3600 сек.</span><input name="text_cooldown" type="number" min="5" max="3600" required></label>
+<label><span>Глас · 10–3600 сек.</span><input name="voice_cooldown" type="number" min="10" max="3600" required></label>
+<label><span>@everyone · 60–86400 сек.</span><input name="everyone_cooldown" type="number" min="60" max="86400" required></label></div></div>
+<div class="card"><h2>Разрешени канали</h2><p>Празно поле разрешава всички канали от съответния вид.</p><div class="grid two" style="margin-top:16px">
+<label><span>ID-та на текстови канали, разделени със запетая</span><input name="text_channels" placeholder="123456789012345678, 234567890123456789"></label>
+<label><span>ID-та на гласови канали, разделени със запетая</span><input name="voice_channels" placeholder="123456789012345678"></label></div>
+<p class="small">В Discord включи Developer Mode, после десен клик върху канала → Copy Channel ID.</p></div>
+<button class="primary">Запази настройките</button>
+</form></section>
+<section id="history" role="tabpanel" aria-labelledby="tab-history" hidden>
+<h2>Кой даде думата на бота?</h2><p>Точната реплика се пази и след редактиране или изтриване от списъка.</p>
+<form id="history-filter" class="card row">
+<label><span>Търсене</span><input name="q" maxlength="200" placeholder="Човек, ID или реплика"></label>
+<label><span>Команда</span><select name="command"><option value="">Всички</option>psuvai</option><option>voice_psuvai</option><option>scammer</option><option>stop</option></select></label>
+<label><span>Резултат</span><select name="status"><option value="">Всички</option><option value="success">Успешна</option><option value="blocked">Отказана</option><option value="failed">Грешка</option><option value="stopped">Спряна</option><option value="running">Изпълнява се</option><option value="interrupted">Прекъсната</option></select></label>
+<button type="submit">Покажи / обнови</button></form>
+<div class="card"><div class="toolbar"><span id="history-count" class="muted">Няма заредена история</span><div class="row"><button id="prev" type="button">← Назад</button><button id="next" type="button">Напред →</button></div></div>
+<div class="table-wrap"><table><thead><tr><th>Кога / команда</th><th>Кой / към кого</th><th>Къде</th><th>Реплика</th><th>Резултат</th></tr></thead><tbody id="history-rows"></tbody></table></div>
+</div><p class="small">Часовете са по българско време. Историята съдържа команди и текстове, без аудиозаписи на участниците.</p>
+</section>
+<footer>Промените се запазват веднага след натискане на съответния бутон. Не е нужен рестарт на бота.</footer>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+let phrases = [], page = 1, total = 0;
+const drafts = new Map();
+const labels = {success:'Успешна',blocked:'Отказана',failed:'Грешка',stopped:'Спряна',running:'Изпълнява се',interrupted:'Прекъсната'};
+function notice(message, error=false) { $('status').textContent=message; $('status').hidden=false; $('status').className=error?'error':''; }
+async function api(path, method='GET', data) {
+  const options={method,headers:{'X-Club-Panel':'1'}};
+  if(data!==undefined){options.headers['Content-Type']='application/json';options.body=JSON.stringify(data);}
+  const response=await fetch('api/'+path,options);
+  if(response.status===401){notice('Сесията е изтекла. Отвори „Сбирки и известия“, за да влезеш отново. Незапазеният текст остава тук.',true);throw Error('Нужно е повторно влизане в панела.');}
+  const result=await response.json();
+  if(!response.ok){const detail=result.detail;throw Error(Array.isArray(detail)?'Провери полетата: '+detail.map(x=>x.loc.slice(1).join('.')).join(', '):(detail||result.message||'Грешка при заявката.'));}
+  return result;
+}
+function el(tag, text, className) {const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;}
+function select(name,options,value){const node=el('select');node.name=name;for(const [key,label] of options){const opt=el('option',label);opt.value=key;node.append(opt);}node.value=value;return node;}
+function field(title,node){const label=el('label');label.append(el('span',title),node);return label;}
+function readPhrase(form){return {kind:form.elements.kind.value,language:form.elements.language.value,text:form.elements.text.value,enabled:form.elements.enabled.checked};}
+async function busy(button, task){button.disabled=true;try{await task();}catch(error){notice(error.message,true);}finally{button.disabled=false;}}
+function renderPhrases(){
+  const list=$('phrase-list');list.replaceChildren();
+  const filter=$('phrase-filter').value, selected=phrases.filter(p=>!filter||p.kind===filter);
+  $('phrase-count').textContent=`${phrases.length} реплики · ${phrases.filter(p=>p.enabled).length} активни`;
+  if(!selected.length){list.append(el('div','Няма реплики в тази категория. Добави първата от полето по-горе.','card empty'));return;}
+  for(const savedPhrase of selected){
+    const phrase={...savedPhrase,...(drafts.get(savedPhrase.id)||{})};
+    const form=el('form',undefined,'card phrase'), row=el('div',undefined,'row');
+    row.append(el('span','#'+phrase.id,'tag'),field('Категория',select('kind',[['roast','Псувня / закачка'],['scammer','Телефонна пародия']],phrase.kind)),field('Език на гласа',select('language',[['bg','Български'],['en','Английски']],phrase.language)));
+    const text=el('textarea');text.name='text';text.value=phrase.text;text.maxLength=1000;text.required=true;text.setAttribute('aria-label','Текст на реплика '+phrase.id);
+    const actions=el('div',undefined,'actions'), toggle=el('label',undefined,'check'), enabled=el('input');enabled.type='checkbox';enabled.name='enabled';enabled.checked=Boolean(phrase.enabled);toggle.append(enabled,el('span','Активна'));
+    const buttons=el('div',undefined,'row'), remove=el('button','Изтрий','danger'),save=el('button','Запази','primary');remove.type='button';save.type='submit';buttons.append(remove,save);actions.append(toggle,buttons);form.append(row,text,actions);
+    form.addEventListener('input',()=>drafts.set(phrase.id,readPhrase(form)));
+    form.addEventListener('change',()=>drafts.set(phrase.id,readPhrase(form)));
+    form.addEventListener('submit',event=>{event.preventDefault();busy(save,async()=>{const values=readPhrase(form);const result=await api('phrases/'+phrase.id,'PUT',values);Object.assign(savedPhrase,values);drafts.delete(phrase.id);notice(result.message);renderPhrases();});});
+    remove.addEventListener('click',()=>{if(confirm('Да изтрия ли тази реплика? Записите в историята ще останат.'))busy(remove,async()=>{const result=await api('phrases/'+phrase.id,'DELETE');phrases=phrases.filter(p=>p.id!==phrase.id);drafts.delete(phrase.id);renderPhrases();notice(result.message);});});
+    list.append(form);
+  }
+}
+function fillSettings(settings){const form=$('settings-form');for(const [key,value] of Object.entries(settings)){const node=form.elements[key];if(!node)continue;if(node.type==='checkbox')node.checked=value;else node.value=Array.isArray(value)?value.join(', '):value;}}
+async function loadHistory(){
+  const params=new URLSearchParams(new FormData($('history-filter')));params.set('page',page);
+  const data=await api('history?'+params);total=data.total;$('history-count').textContent=`${total} записа · страница ${page} от ${Math.max(1,Math.ceil(total/50))}`;
+  $('prev').disabled=page===1;$('next').disabled=page*50>=total;const rows=$('history-rows');rows.replaceChildren();
+  if(!data.items.length){const row=el('tr'),cell=el('td','Няма записи за избраните условия.','empty');cell.colSpan=5;row.append(cell);rows.append(row);return;}
+  for(const item of data.items){
+    const row=el('tr'),when=el('td'),who=el('td'),where=el('td'),text=el('td',item.text||'—'),outcome=el('td');
+    when.append(el('div',new Date(item.created_at).toLocaleString('bg-BG',{timeZone:'Europe/Sofia'})),el('div','/'+item.command,'muted'));
+    who.append(el('div',item.actor_name),el('small',item.actor_id));if(item.target_name)who.append(el('div','→ '+item.target_name));
+    where.append(el('div',item.channel_name?'#'+item.channel_name:item.channel_id));if(item.voice_channel_id)where.append(el('div','🔊 '+(item.voice_channel_name||item.voice_channel_id),'muted'));
+    outcome.append(el('div',labels[item.status]||item.status,labels[item.status]?item.status:''));if(item.detail)outcome.append(el('small',item.detail));row.append(when,who,where,text,outcome);rows.append(row);
+  }
+}
+for(const button of document.querySelectorAll('[data-tab]'))button.addEventListener('click',async()=>{
+  for(const other of document.querySelectorAll('[data-tab]')){const active=other===button;other.setAttribute('aria-selected',String(active));$(other.dataset.tab).hidden=!active;}
+  if(button.dataset.tab==='history')try{await loadHistory();}catch(error){notice(error.message,true);}
+});
+$('phrase-filter').addEventListener('change',renderPhrases);
+$('new-phrase').addEventListener('submit',event=>{event.preventDefault();const form=event.target;busy(form.querySelector('button'),async()=>{const values=readPhrase(form), result=await api('phrases','POST',values);phrases.unshift({...values,id:result.id});form.reset();renderPhrases();notice(result.message);});});
+$('settings-form').addEventListener('submit',event=>{event.preventDefault();const form=event.target;busy(form.querySelector('button'),async()=>{const values={};for(const key of ['enabled','voice_enabled','allow_everyone'])values[key]=form.elements[key].checked;for(const key of ['text_cooldown','voice_cooldown','everyone_cooldown'])values[key]=Number(form.elements[key].value);for(const key of ['text_channels','voice_channels'])values[key]=form.elements[key].value.split(',').map(x=>x.trim()).filter(Boolean);const result=await api('settings','PUT',values);notice(result.message);});});
+$('history-filter').addEventListener('submit',event=>{event.preventDefault();page=1;busy(event.target.querySelector('button'),loadHistory);});
+$('prev').addEventListener('click',async()=>{if(page>1){page--;try{await loadHistory();}catch(error){notice(error.message,true);}}});
+$('next').addEventListener('click',async()=>{if(page*50<total){page++;try{await loadHistory();}catch(error){notice(error.message,true);}}});
+$('logout').addEventListener('click',()=>busy($('logout'),async()=>{const response=await fetch('../logout',{method:'POST'});if(!response.ok)throw Error('Изходът не беше успешен.');location.href='../';}));
+api('bootstrap').then(data=>{phrases=data.phrases;renderPhrases();fillSettings(data.settings);}).catch(error=>notice(error.message,true));
+</script></body></html>
