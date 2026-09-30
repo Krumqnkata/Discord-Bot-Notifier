@@ -212,7 +212,8 @@ def test_runner_uses_same_app_client_and_original_file(tmp_path, monkeypatch):
         assert runner.fun.bot is runner.main.bot
         assert len(runner.main.tree.get_commands()) == 5
         assert runner.main.bot.intents.voice_states
-        assert "/health" in {r.path for r in runner.app.routes}
+        assert "/health" in {getattr(r, "path", None) for r in runner.app.routes}
+        assert 'href="fun/"' in runner.main.HTML_TEMPLATE
         assert (root / "main.py").read_bytes() == (tmp_path / "main.py").read_bytes()
     finally:
         sys.modules.pop("run_club", None)

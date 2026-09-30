@@ -17,7 +17,8 @@ from discord import app_commands
 
 log = logging.getLogger(__name__)
 
-# Edit these fixed lines to add the club's own jokes. No arbitrary TTS input.
+# Seed lines for the first launch; afterwards edit phrases in the admin panel.
+# Discord commands do not accept arbitrary TTS input.
 ROASTS = (
     "Ебаси кода — и кошчето отказва да го приеме!",
     "Мамка му, пак ли дебъгваш с молитва и рестарт?",
@@ -46,6 +47,11 @@ class Settings:
     allow_everyone: bool = False
     text_channels: frozenset[int] = frozenset()
     voice_channels: frozenset[int] = frozenset()
+    enabled: bool = True
+    voice_enabled: bool = True
+    text_cooldown: int = 15
+    voice_cooldown: int = 30
+    everyone_cooldown: int = 300
 
     @classmethod
     def from_env(cls):
@@ -84,7 +90,7 @@ def mention_policy(settings, interaction, member, everyone):
         if member is not None:
             raise FunError("Избери човек ИЛИ всички, не и двете.")
         if not settings.allow_everyone:
-            raise FunError("Масовото тагване е изключено. Настройката е FUN_ALLOW_EVERYONE=1.")
+            raise FunError("Масовото тагване е изключено от настройките на бота.")
         if not interaction.user.guild_permissions.administrator:
             raise FunError("Само администратор може да използва everyone:true.")
         if not interaction.app_permissions.mention_everyone:
@@ -116,15 +122,41 @@ async def synthesize(text: str, language: str, path: Path):
 
 
 class ClubFun:
-    def __init__(self, bot, tree, settings):
-        self.bot, self.tree, self.settings = bot, tree, settings
+    def __init__(self, bot, tree, settings, store=None):
+        self.bot, self.tree, self._settings, self.store = bot, tree, settings, store
         self.cooldowns = Cooldowns()
         self.jobs: dict[int, asyncio.Task] = {}
         self.busy: set[int] = set()
 
+    @property
+    def settings(self):
+        return Settings(**self.store.settings()) if self.store else self._settings
+
+    @settings.setter
+    def settings(self, value):
+        self._settings = value
+
+    def phrase(self, scammer=False):
+        if self.store:
+            selected = self.store.choose_phrase("scammer" if scammer else "roast")
+            if selected is None:
+                raise FunError("Няма активни реплики за тази команда. Добави ги в админ панела.")
+            return selected
+        return {"text": random.choice(SCAMMER_LINES if scammer else ROASTS),
+                "language": "en" if scammer else "bg"}
+
+    def begin(self, interaction, command, member=None, everyone=False):
+        return self.store.begin(interaction, command, member, everyone) if self.store else None
+
+    def record(self, event_id, status, detail="", text=None):
+        if self.store and event_id is not None:
+            self.store.record(event_id, status, detail, text)
+
     def check_context(self, interaction, *, restrict_channel=True):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             raise FunError("Тази команда работи само в сървъра.")
+        if restrict_channel and not self.settings.enabled:
+            raise FunError("Забавните команди са временно изключени от админ панела.")
         if (restrict_channel and self.settings.text_channels
                 and interaction.channel_id not in self.settings.text_channels):
             raise FunError("Забавните команди не са разрешени в този текстов канал.")
@@ -137,20 +169,31 @@ class ClubFun:
             await interaction.response.send_message(message, **kwargs)
 
     async def roast(self, interaction, member=None, everyone=False):
+        event = self.begin(interaction, "psuvai", member, everyone)
         try:
             self.check_context(interaction)
             prefix, mentions = mention_policy(self.settings, interaction, member, everyone)
+            phrase = self.phrase()
             # A server-wide limit prevents alternating users from bypassing it.
             self.cooldowns.take((interaction.guild_id, "everyone" if everyone else "roast"),
-                                300 if everyone else 15)
+                                self.settings.everyone_cooldown if everyone else self.settings.text_cooldown)
+            self.record(event, "running", text=phrase["text"])
             await interaction.response.send_message(
-                f"{prefix} {random.choice(ROASTS)} 😂", allowed_mentions=mentions)
+                f"{prefix} {phrase['text']} 😂", allowed_mentions=mentions)
+            self.record(event, "success")
         except FunError as exc:
+            self.record(event, "blocked", str(exc))
             await self.error(interaction, str(exc))
+        except Exception as exc:
+            self.record(event, "failed", type(exc).__name__)
+            raise
 
     async def speak(self, interaction, scammer=False):
+        event = self.begin(interaction, "scammer" if scammer else "voice_psuvai")
         try:
             self.check_context(interaction)
+            if not self.settings.voice_enabled:
+                raise FunError("Гласовите команди са изключени от админ панела.")
             state = interaction.user.voice
             if state is None or not isinstance(state.channel, discord.VoiceChannel):
                 raise FunError("Първо влез в обикновен гласов канал (не Stage).")
@@ -164,10 +207,15 @@ class ClubFun:
                 raise FunError("Вече говоря или съм свързан. Използвай /stop, ако трябва да спра.")
             if not shutil.which("ffmpeg") or not shutil.which("espeak-ng"):
                 raise FunError("Липсва гласов пакет. Инсталирай: sudo apt install espeak-ng ffmpeg")
-            self.cooldowns.take((interaction.guild_id, "voice"), 30)
+            phrase = self.phrase(scammer)
+            self.cooldowns.take((interaction.guild_id, "voice"), self.settings.voice_cooldown)
         except FunError as exc:
+            self.record(event, "blocked", str(exc))
             await self.error(interaction, str(exc))
             return
+        except Exception as exc:
+            self.record(event, "failed", type(exc).__name__)
+            raise
 
         self.busy.add(interaction.guild_id)
         try:
@@ -175,22 +223,28 @@ class ClubFun:
             # Recheck after acknowledging: the requester may have left while we awaited Discord.
             if not interaction.user.voice or interaction.user.voice.channel != channel:
                 raise FunError("Вече не си в същия гласов канал. Опитай отново.")
-            job = asyncio.create_task(self.play(interaction, channel, scammer))
+            self.record(event, "running", text=phrase["text"])
+            job = asyncio.create_task(self.play(interaction, channel, scammer, phrase, event))
             self.jobs[interaction.guild_id] = job
+            # Also records cancellation before the coroutine had its first turn.
+            job.add_done_callback(lambda task: self.record(event, "stopped", "Спряно или изключен процес.")
+                                  if task.cancelled() else None)
         except BaseException as exc:
             self.busy.discard(interaction.guild_id)
+            self.record(event, "stopped" if isinstance(exc, asyncio.CancelledError) else "failed",
+                        str(exc) if isinstance(exc, FunError) else type(exc).__name__)
             if isinstance(exc, FunError):
                 await self.error(interaction, str(exc))
             else:
                 raise
 
-    async def play(self, interaction, channel, scammer):
+    async def play(self, interaction, channel, scammer, phrase, event):
         voice = source = None
         try:
-            text = random.choice(SCAMMER_LINES if scammer else ROASTS)
+            text = phrase["text"]
             with tempfile.TemporaryDirectory(prefix="itclub-voice-") as folder:
                 path = Path(folder) / "speech.wav"
-                await synthesize(text, "en" if scammer else "bg", path)
+                await synthesize(text, phrase["language"], path)
                 if not interaction.user.voice or interaction.user.voice.channel != channel:
                     raise FunError("Излезе от канала, затова отмених репликата.")
                 voice = await channel.connect(timeout=15, reconnect=False, self_deaf=True)
@@ -212,12 +266,14 @@ class ClubFun:
                     "☎️ Пускам пародийното обаждане." if scammer else "🔊 Пускам репликата.",
                     ephemeral=True)
                 await asyncio.wait_for(finished, timeout=45)
+                self.record(event, "success")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.exception("Club voice playback failed")
             message = str(exc) if isinstance(exc, FunError) else (
                 "Не успях да пусна звука. Провери voice зависимостите, правата и лога на сървъра.")
+            self.record(event, "failed", str(exc) if isinstance(exc, FunError) else type(exc).__name__)
             with suppress(discord.HTTPException):
                 await self.error(interaction, message)
         finally:
@@ -236,6 +292,7 @@ class ClubFun:
                 self.busy.discard(interaction.guild_id)
 
     async def stop(self, interaction):
+        event = self.begin(interaction, "stop")
         try:
             self.check_context(interaction, restrict_channel=False)
             voice = interaction.guild.voice_client
@@ -253,8 +310,13 @@ class ClubFun:
             elif voice:
                 await voice.disconnect(force=True)
             await interaction.followup.send("⏹️ Спрях и излязох от гласовия канал.", ephemeral=True)
+            self.record(event, "success")
         except FunError as exc:
+            self.record(event, "blocked", str(exc))
             await self.error(interaction, str(exc))
+        except Exception as exc:
+            self.record(event, "failed", type(exc).__name__)
+            raise
 
     async def close(self):
         jobs = list(self.jobs.values())
@@ -265,9 +327,9 @@ class ClubFun:
         self.busy.clear()
 
 
-def install(bot, tree, settings=None):
+def install(bot, tree, settings=None, store=None):
     """Register before the notifier's on_ready copies/syncs its command tree."""
-    fun = ClubFun(bot, tree, settings or Settings.from_env())
+    fun = ClubFun(bot, tree, settings or Settings.from_env(), store)
 
     @tree.command(name="psuvai", description="Шеговита псувня към теб, избран човек или всички")
     @app_commands.guild_only()
