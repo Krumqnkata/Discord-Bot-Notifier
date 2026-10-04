@@ -36,6 +36,8 @@ COOKIE_FILE = os.getenv(
 ).strip()
 
 YTDLP_OPTIONS = {
+    # Prefer YouTube Opus audio, then M4A, without selecting a video stream.
+    "format": "251/250/249/140/bestaudio",
     "quiet": True,
     "no_warnings": True,
     "noplaylist": True,
@@ -268,33 +270,14 @@ class MusicService:
         return await self.extract_raw(str(url))
 
     async def extract_raw(self, query: str) -> dict:
-        """Extract raw media metadata without yt-dlp format selection."""
+        """Extract a single playable audio format."""
         info = await self._run_ydl(
             query,
-            process=False,
+            process=True,
             options={
                 "extract_flat": False,
             },
         )
-
-        # Resolve URL indirections manually while still avoiding format selection.
-        for _ in range(3):
-            if not isinstance(info, dict):
-                break
-
-            result_type = info.get("_type")
-            if result_type not in {"url", "url_transparent"}:
-                break
-
-            next_url = info.get("url")
-            if not next_url:
-                break
-
-            info = await self._run_ydl(
-                str(next_url),
-                process=False,
-                options={"extract_flat": False},
-            )
 
         if not isinstance(info, dict):
             raise MusicError("Източникът върна неочакван резултат.")
@@ -408,10 +391,8 @@ class MusicService:
 
     async def stream_url(self, track: Track) -> tuple[str, str]:
         # Refresh immediately before playback because signed stream URLs can expire
-        # while a song waits in the queue. We intentionally do not force a yt-dlp
-        # format selector: authenticated YouTube clients can expose different
-        # format sets because of SABR experiments. Instead, inspect the formats
-        # that are actually available and pick an audio-only URL ourselves.
+        # while a song waits in the queue. yt-dlp is constrained to audio-only
+        # formats, then we take the selected direct media URL.
         info = await self.extract(track.webpage_url)
         stream = self.pick_audio_stream(info)
         return stream, info.get("title") or track.title
