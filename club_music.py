@@ -224,15 +224,48 @@ class MusicService:
         except asyncio.TimeoutError as exc:
             raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
         except Exception as exc:
-            log.warning(
-                "yt-dlp lookup failed for %r (process=%s): %s",
-                query,
-                process,
-                exc,
-            )
-            raise MusicError(
-                "Не успях да намеря или отворя този аудио източник."
-            ) from exc
+            message = str(exc)
+            if process and "Requested format is not available" in message:
+                log.warning(
+                    "Preferred format unavailable for %r; retrying with all formats",
+                    query,
+                )
+
+                retry_opts = dict(opts)
+                retry_opts["format"] = "all"
+
+                def do_retry():
+                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                        return ydl.extract_info(
+                            query,
+                            download=False,
+                            process=True,
+                        )
+
+                try:
+                    info = await asyncio.wait_for(
+                        asyncio.to_thread(do_retry),
+                        timeout=30,
+                    )
+                except Exception as retry_exc:
+                    log.warning(
+                        "yt-dlp all-format retry failed for %r: %s",
+                        query,
+                        retry_exc,
+                    )
+                    raise MusicError(
+                        "Не успях да намеря използваем формат за този източник."
+                    ) from retry_exc
+            else:
+                log.warning(
+                    "yt-dlp lookup failed for %r (process=%s): %s",
+                    query,
+                    process,
+                    exc,
+                )
+                raise MusicError(
+                    "Не успях да намеря или отворя този аудио източник."
+                ) from exc
 
         if not info:
             raise MusicError("Няма намерен резултат.")
