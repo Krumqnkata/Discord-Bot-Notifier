@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 from typing import Deque
 from urllib.parse import quote
@@ -22,41 +21,15 @@ from urllib.request import Request, urlopen
 
 import discord
 from discord import app_commands
-import yt_dlp
 
 log = logging.getLogger(__name__)
-
-POT_PROVIDER_URL = os.getenv(
-    "MUSIC_POT_PROVIDER_URL",
-    "http://127.0.0.1:4416",
-).strip()
 
 COOKIE_FILE = os.getenv(
     "MUSIC_YTDLP_COOKIES",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube-cookies.txt"),
 ).strip()
 
-YTDLP_OPTIONS = {
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "default_search": "ytsearch1",
-    "skip_download": True,
-    "extract_flat": False,
-    "source_address": "0.0.0.0",
-    # Keep the PO-token provider available, but let yt-dlp choose the YouTube
-    # client automatically. Account cookies currently work with the default
-    # client selection on this VPS, while forcing mweb can trigger LOGIN_REQUIRED.
-    "extractor_args": {
-        "youtubepot-bgutilhttp": {
-            "base_url": [POT_PROVIDER_URL],
-        },
-    },
-}
-
-if COOKIE_FILE and os.path.isfile(COOKIE_FILE):
-    YTDLP_OPTIONS["cookiefile"] = COOKIE_FILE
-else:
+if not (COOKIE_FILE and os.path.isfile(COOKIE_FILE)):
     log.warning(
         "Music cookie file not found at %s; YouTube may reject VPS requests",
         COOKIE_FILE,
@@ -70,6 +43,11 @@ DEFAULT_VOLUME = max(0, min(100, int(os.getenv("MUSIC_DEFAULT_VOLUME", "60"))))
 
 SPOTIFY_RE = re.compile(
     r"https?://(?:open\.)?spotify\.com/(?P<kind>track|album|playlist)/(?P<id>[A-Za-z0-9]+)",
+    re.IGNORECASE,
+)
+
+YOUTUBE_VIDEO_RE = re.compile(
+    r"https?://(?:(?:www\.)?youtube\.com/(?:watch\?v=|shorts/|live/|embed/)|youtu\.be/)(?P<id>[A-Za-z0-9_-]{6,})",
     re.IGNORECASE,
 )
 
@@ -185,140 +163,128 @@ class MusicService:
         )
         return title.strip()
 
-    async def normalize_query(self, query: str) -> tuple[str, str]:
-        query = query.strip()
-        if not query:
-            raise MusicError("Напиши име на песен или постави линк.")
+    @staticmethod
+    def _duration_value(value: str | None) -> int | None:
+        if not value or value in {"NA", "None", "null"}:
+            return None
+        try:
+            return max(0, int(float(value)))
+        except (TypeError, ValueError):
+            return None
 
-        spotify_match = SPOTIFY_RE.search(query)
-        if spotify_match:
-            search_text = await self.spotify_search_text(query)
-            return f"ytsearch1:{search_text}", "Spotify → YouTube"
-
-        if re.match(r"^https?://", query, flags=re.IGNORECASE):
-            return query, "YouTube/линк"
-
-        return f"ytsearch1:{query}", "YouTube/търсене"
-
-    async def _run_ydl(self, query: str, *, process: bool, options: dict | None = None) -> dict:
-        if not shutil.which("ffmpeg"):
-            raise MusicError(
-                "Липсва FFmpeg на сървъра. Инсталирай: sudo apt install ffmpeg"
+    async def youtube_oembed_title(self, url: str) -> str:
+        def fetch() -> str:
+            endpoint = (
+                "https://www.youtube.com/oembed?format=json&url="
+                + quote(url, safe="")
             )
-
-        opts = dict(YTDLP_OPTIONS)
-        if options:
-            opts.update(options)
-
-        def do_extract():
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(
-                    query,
-                    download=False,
-                    process=process,
-                )
+            request = Request(endpoint, headers={"User-Agent": "ITClubDiscordBot/1.0"})
+            with urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+            return str(payload.get("title") or "").strip()
 
         try:
-            info = await asyncio.wait_for(asyncio.to_thread(do_extract), timeout=30)
-        except asyncio.TimeoutError as exc:
-            raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
+            return await asyncio.wait_for(asyncio.to_thread(fetch), timeout=12)
         except Exception as exc:
-            log.warning(
-                "yt-dlp lookup failed for %r (process=%s): %s",
-                query,
-                process,
-                exc,
-            )
-            raise MusicError(
-                "Не успях да намеря или отворя този аудио източник."
-            ) from exc
+            log.info("YouTube oEmbed metadata unavailable for %r: %s", url, exc)
+            return ""
 
-        if not info:
-            raise MusicError("Няма намерен резултат.")
-        return info
+    async def cli_search_track(
+        self,
+        search_text: str,
+        requester_name: str,
+        source_label: str,
+    ) -> Track:
+        base = self._cli_base_args()
+        template = "%(id)s\t%(title)s\t%(duration)s\t%(webpage_url)s"
+        out, _ = await self._run_cli([
+            *base,
+            "--flat-playlist",
+            "--playlist-end", "1",
+            "--print", template,
+            f"ytsearch1:{search_text}",
+        ])
 
-    async def extract_search_result(self, query: str) -> dict:
-        """Resolve ytsearch without processing the selected video's formats."""
-        info = await self._run_ydl(
-            query,
-            process=True,
-            options={
-                "extract_flat": "in_playlist",
-                "playlistend": 1,
-            },
+        rows = [
+            line.strip()
+            for line in out.splitlines()
+            if line.strip() and not line.lstrip().startswith("[")
+        ]
+        if not rows:
+            raise MusicError("YouTube търсенето не върна резултат.")
+
+        parts = rows[-1].split("\t", 3)
+        if len(parts) < 2:
+            raise MusicError("Не успях да прочета резултата от YouTube търсенето.")
+
+        video_id = parts[0].strip()
+        title = parts[1].strip() or "Неизвестно заглавие"
+        duration = self._duration_value(parts[2].strip() if len(parts) > 2 else None)
+        webpage_url = parts[3].strip() if len(parts) > 3 else ""
+        if not webpage_url or webpage_url in {"NA", "None"}:
+            webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+
+        return Track(
+            query=search_text,
+            webpage_url=webpage_url,
+            title=title,
+            duration=duration,
+            requested_by=requester_name,
+            source_label=source_label,
         )
-
-        entries = [entry for entry in (info.get("entries") or []) if entry]
-        if not entries:
-            raise MusicError("Няма намерен резултат.")
-
-        entry = entries[0]
-        url = entry.get("webpage_url") or entry.get("url")
-
-        # Flat YouTube search entries can expose only the video ID in url.
-        if (
-            url
-            and not str(url).startswith(("http://", "https://"))
-            and (entry.get("extractor_key") == "Youtube" or entry.get("ie_key") == "Youtube")
-        ):
-            url = f"https://www.youtube.com/watch?v={url}"
-
-        if not url:
-            raise MusicError("Търсенето не върна използваем линк.")
-
-        return await self.extract_raw(str(url))
-
-    async def extract_raw(self, query: str) -> dict:
-        """Extract metadata without running yt-dlp's format selector."""
-        info = await self._run_ydl(
-            query,
-            process=False,
-            options={"extract_flat": False},
-        )
-
-        # Resolve transparent URL wrappers while still avoiding format selection.
-        for _ in range(3):
-            if not isinstance(info, dict):
-                break
-            if info.get("_type") not in {"url", "url_transparent"}:
-                break
-            next_url = info.get("url")
-            if not next_url:
-                break
-            info = await self._run_ydl(
-                str(next_url),
-                process=False,
-                options={"extract_flat": False},
-            )
-
-        if not isinstance(info, dict):
-            raise MusicError("Източникът върна неочакван резултат.")
-        return info
-
-    async def extract(self, query: str) -> dict:
-        if query.startswith(("ytsearch:", "ytsearch1:", "ytsearch2:", "ytsearch3:")):
-            return await self.extract_search_result(query)
-        return await self.extract_raw(query)
 
     async def track_from_query(
         self,
         query: str,
-        requester: discord.Member,
+        requester: discord.Member | str,
     ) -> Track:
-        normalized, source_label = await self.normalize_query(query)
-        info = await self.extract(normalized)
-        webpage_url = (
-            info.get("webpage_url")
-            or info.get("original_url")
-            or normalized
+        query = query.strip()
+        if not query:
+            raise MusicError("Напиши име на песен или постави линк.")
+
+        requester_name = (
+            requester.display_name
+            if isinstance(requester, discord.Member)
+            else str(requester)
         )
-        return Track(
-            query=query,
-            webpage_url=webpage_url,
-            title=info.get("title") or "Неизвестно заглавие",
-            duration=info.get("duration"),
-            requested_by=requester.display_name,
-            source_label=source_label,
+
+        spotify_match = SPOTIFY_RE.search(query)
+        if spotify_match:
+            search_text = await self.spotify_search_text(query)
+            return await self.cli_search_track(
+                search_text,
+                requester_name,
+                "Spotify → YouTube",
+            )
+
+        youtube_match = YOUTUBE_VIDEO_RE.search(query)
+        if youtube_match:
+            title = await self.youtube_oembed_title(query)
+            return Track(
+                query=query,
+                webpage_url=query,
+                title=title or f"YouTube видео {youtube_match.group('id')}",
+                duration=None,
+                requested_by=requester_name,
+                source_label="YouTube/линк",
+            )
+
+        if re.match(r"^https?://", query, flags=re.IGNORECASE):
+            # Keep other yt-dlp-supported URLs usable. Stream resolution is
+            # still done by the proven yt-dlp CLI path.
+            return Track(
+                query=query,
+                webpage_url=query,
+                title=query,
+                duration=None,
+                requested_by=requester_name,
+                source_label="Външен линк",
+            )
+
+        return await self.cli_search_track(
+            query,
+            requester_name,
+            "YouTube/търсене",
         )
 
     async def _run_cli(self, args: list[str], *, timeout: int = 35) -> tuple[str, str]:
@@ -691,6 +657,237 @@ class MusicService:
             )
         except MusicError as exc:
             await self.error(interaction, str(exc))
+
+    def _admin_guild(self, guild_id: int) -> discord.Guild:
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            raise MusicError("Discord сървърът не е намерен.")
+        return guild
+
+    def admin_guilds(self) -> list[dict]:
+        result = []
+        for guild in sorted(self.bot.guilds, key=lambda item: item.name.lower()):
+            channels = [
+                {
+                    "id": str(channel.id),
+                    "name": channel.name,
+                }
+                for channel in guild.voice_channels
+            ]
+            result.append(
+                {
+                    "id": str(guild.id),
+                    "name": guild.name,
+                    "voice_channels": channels,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _track_payload(track: Track | None) -> dict | None:
+        if track is None:
+            return None
+        return {
+            "title": track.title,
+            "duration": track.duration_text,
+            "requested_by": track.requested_by,
+            "source": track.source_label,
+            "url": track.webpage_url,
+        }
+
+    async def admin_snapshot(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        async with player.lock:
+            queued = list(player.queue)
+
+        voice = guild.voice_client
+        return {
+            "guild_id": str(guild.id),
+            "guild_name": guild.name,
+            "connected": bool(voice and voice.is_connected()),
+            "voice_channel_id": (
+                str(voice.channel.id)
+                if voice and voice.is_connected() and voice.channel
+                else None
+            ),
+            "voice_channel_name": (
+                voice.channel.name
+                if voice and voice.is_connected() and voice.channel
+                else None
+            ),
+            "playing": bool(voice and voice.is_playing()),
+            "paused": bool(voice and voice.is_paused()),
+            "volume": player.volume,
+            "current": self._track_payload(player.current),
+            "queue": [
+                {"index": index, **self._track_payload(track)}
+                for index, track in enumerate(queued, start=1)
+            ],
+        }
+
+    async def _admin_connect(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+    ) -> discord.VoiceClient:
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.VoiceChannel):
+            raise MusicError("Гласовият канал не е намерен.")
+
+        voice = guild.voice_client
+        player = self.player(guild.id)
+
+        if (
+            voice is not None
+            and (voice.is_playing() or voice.is_paused())
+            and player.current is None
+        ):
+            raise MusicError(
+                "Ботът в момента използва voice канала за друга команда."
+            )
+
+        if voice is not None and voice.is_connected():
+            if voice.channel != channel:
+                try:
+                    await voice.move_to(channel)
+                except discord.DiscordException as exc:
+                    raise MusicError(
+                        "Не успях да преместя бота в избрания voice канал."
+                    ) from exc
+            return voice
+
+        perms = channel.permissions_for(guild.me)
+        if not (perms.view_channel and perms.connect and perms.speak):
+            raise MusicError(
+                "Ботът се нуждае от View Channel, Connect и Speak."
+            )
+
+        try:
+            return await channel.connect(
+                timeout=20,
+                reconnect=True,
+                self_deaf=True,
+            )
+        except discord.DiscordException as exc:
+            raise MusicError(
+                "Не успях да се свържа с гласовия канал."
+            ) from exc
+
+    async def admin_play(
+        self,
+        guild_id: int,
+        voice_channel_id: int,
+        query: str,
+    ) -> dict:
+        guild = self._admin_guild(guild_id)
+        player = self.player(guild_id)
+
+        async with player.lock:
+            if len(player.queue) >= MAX_QUEUE_SIZE:
+                raise MusicError(
+                    f"Опашката е пълна ({MAX_QUEUE_SIZE} песни)."
+                )
+
+        track = await self.track_from_query(query, "Уеб панел")
+        voice = await self._admin_connect(guild, voice_channel_id)
+        was_idle = (
+            not voice.is_playing()
+            and not voice.is_paused()
+            and player.current is None
+        )
+
+        async with player.lock:
+            player.queue.append(track)
+
+        self.ensure_worker(guild)
+        return {
+            "title": track.title,
+            "duration": track.duration_text,
+            "started": was_idle,
+        }
+
+    async def admin_pause(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        if voice is None or not voice.is_playing():
+            raise MusicError("В момента няма песен, която да паузирам.")
+        voice.pause()
+        return {"paused": True}
+
+    async def admin_resume(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        if voice is None or not voice.is_paused():
+            raise MusicError("Музиката не е на пауза.")
+        voice.resume()
+        return {"paused": False}
+
+    async def admin_skip(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        if voice is None or not (voice.is_playing() or voice.is_paused()):
+            raise MusicError("Няма активна песен за прескачане.")
+        voice.stop()
+        return {"skipped": True}
+
+    async def admin_clear_queue(self, guild_id: int) -> dict:
+        self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        async with player.lock:
+            removed = len(player.queue)
+            player.queue.clear()
+        return {"removed": removed}
+
+    async def admin_remove(self, guild_id: int, index: int) -> dict:
+        self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        async with player.lock:
+            items = list(player.queue)
+            if index < 1 or index > len(items):
+                raise MusicError("Тази позиция вече не съществува в опашката.")
+            removed = items.pop(index - 1)
+            player.queue = deque(items)
+        return {"title": removed.title}
+
+    async def admin_set_volume(self, guild_id: int, percent: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        player.volume = max(0, min(100, int(percent)))
+
+        voice = guild.voice_client
+        if (
+            voice is not None
+            and isinstance(voice.source, discord.PCMVolumeTransformer)
+        ):
+            voice.source.volume = player.volume / 100
+
+        return {"volume": player.volume}
+
+    async def admin_leave(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        player = self.player(guild_id)
+        player.stopping = True
+
+        async with player.lock:
+            player.queue.clear()
+
+        if voice is not None and (voice.is_playing() or voice.is_paused()):
+            voice.stop()
+
+        if player.worker:
+            player.worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await player.worker
+            player.worker = None
+
+        if voice is not None and voice.is_connected():
+            await voice.disconnect(force=True)
+
+        player.current = None
+        player.stopping = False
+        return {"disconnected": True}
 
     async def close(self):
         for player in self.players.values():
