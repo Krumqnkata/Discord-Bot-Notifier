@@ -36,8 +36,6 @@ COOKIE_FILE = os.getenv(
 ).strip()
 
 YTDLP_OPTIONS = {
-    # Prefer the best format that contains audio. It may also contain video; FFmpeg drops video with -vn.
-    "format": "bestaudio*/best",
     "quiet": True,
     "no_warnings": True,
     "noplaylist": True,
@@ -77,6 +75,19 @@ SPOTIFY_RE = re.compile(
 
 class MusicError(Exception):
     """Short error safe to show to a Discord user."""
+
+
+class FormatProbeYDL(yt_dlp.YoutubeDL):
+    """Capture the processed format table before yt-dlp selects a format."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.probed_info: dict | None = None
+
+    def list_formats(self, info_dict):
+        # yt-dlp calls this after it has normalized/sorted formats and attached
+        # direct media URLs, but before normal format selection happens.
+        self.probed_info = info_dict
 
 
 @dataclass(slots=True)
@@ -224,48 +235,15 @@ class MusicService:
         except asyncio.TimeoutError as exc:
             raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
         except Exception as exc:
-            message = str(exc)
-            if process and "Requested format is not available" in message:
-                log.warning(
-                    "Preferred format unavailable for %r; retrying with all formats",
-                    query,
-                )
-
-                retry_opts = dict(opts)
-                retry_opts["format"] = "all"
-
-                def do_retry():
-                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
-                        return ydl.extract_info(
-                            query,
-                            download=False,
-                            process=True,
-                        )
-
-                try:
-                    info = await asyncio.wait_for(
-                        asyncio.to_thread(do_retry),
-                        timeout=30,
-                    )
-                except Exception as retry_exc:
-                    log.warning(
-                        "yt-dlp all-format retry failed for %r: %s",
-                        query,
-                        retry_exc,
-                    )
-                    raise MusicError(
-                        "Не успях да намеря използваем формат за този източник."
-                    ) from retry_exc
-            else:
-                log.warning(
-                    "yt-dlp lookup failed for %r (process=%s): %s",
-                    query,
-                    process,
-                    exc,
-                )
-                raise MusicError(
-                    "Не успях да намеря или отворя този аудио източник."
-                ) from exc
+            log.warning(
+                "yt-dlp lookup failed for %r (process=%s): %s",
+                query,
+                process,
+                exc,
+            )
+            raise MusicError(
+                "Не успях да намеря или отворя този аудио източник."
+            ) from exc
 
         if not info:
             raise MusicError("Няма намерен резултат.")
@@ -303,18 +281,46 @@ class MusicService:
         return await self.extract_raw(str(url))
 
     async def extract_raw(self, query: str) -> dict:
-        """Extract a single playable audio format."""
-        info = await self._run_ydl(
-            query,
-            process=True,
-            options={
-                "extract_flat": False,
-            },
-        )
+        """Use yt-dlp's -F processing path and capture its processed formats."""
+        opts = dict(YTDLP_OPTIONS)
+        opts.pop("format", None)
+        opts.update({
+            "extract_flat": False,
+            "listformats": True,
+            "simulate": True,
+        })
+
+        def do_probe():
+            with FormatProbeYDL(opts) as ydl:
+                result = ydl.extract_info(
+                    query,
+                    download=False,
+                    process=True,
+                )
+                return ydl.probed_info or result
+
+        try:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(do_probe),
+                timeout=30,
+            )
+        except asyncio.TimeoutError as exc:
+            raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
+        except Exception as exc:
+            log.warning("yt-dlp format probe failed for %r: %s", query, exc)
+            raise MusicError(
+                "Не успях да прочета наличните формати за този източник."
+            ) from exc
 
         if not isinstance(info, dict):
-            raise MusicError("Източникът върна неочакван резултат.")
+            raise MusicError("Източникът не върна информация за формати.")
 
+        formats = info.get("formats") or []
+        log.info(
+            "yt-dlp format probe for %s returned %s formats",
+            info.get("id") or query,
+            len(formats),
+        )
         return info
 
     async def extract(self, query: str) -> dict:
@@ -423,9 +429,8 @@ class MusicService:
         return best["url"]
 
     async def stream_url(self, track: Track) -> tuple[str, str]:
-        # Refresh immediately before playback because signed stream URLs can expire
-        # while a song waits in the queue. yt-dlp is constrained to audio-only
-        # formats, then we take the selected direct media URL.
+        # Refresh immediately before playback because signed stream URLs can expire.
+        # extract_raw uses yt-dlp's list-formats path, so no format selector runs.
         info = await self.extract(track.webpage_url)
         stream = self.pick_audio_stream(info)
         return stream, info.get("title") or track.title
