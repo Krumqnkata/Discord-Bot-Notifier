@@ -36,6 +36,7 @@ COOKIE_FILE = os.getenv(
 ).strip()
 
 YTDLP_OPTIONS = {
+    "format": "all[vcodec=none]",
     "quiet": True,
     "no_warnings": True,
     "noplaylist": True,
