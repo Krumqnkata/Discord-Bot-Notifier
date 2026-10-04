@@ -36,7 +36,6 @@ COOKIE_FILE = os.getenv(
 ).strip()
 
 YTDLP_OPTIONS = {
-    "format": "bestaudio/best",
     "quiet": True,
     "no_warnings": True,
     "noplaylist": True,
@@ -247,13 +246,74 @@ class MusicService:
             source_label=source_label,
         )
 
+    @staticmethod
+    def pick_audio_stream(info: dict) -> str:
+        """Pick a directly playable audio-only URL from yt-dlp metadata."""
+        formats = list(info.get("formats") or [])
+        formats.extend(info.get("requested_formats") or [])
+
+        candidates = []
+        seen_urls = set()
+        for fmt in formats:
+            url = fmt.get("url")
+            if not url or url in seen_urls:
+                continue
+
+            acodec = fmt.get("acodec")
+            vcodec = fmt.get("vcodec")
+            if acodec in (None, "none"):
+                continue
+            if vcodec not in (None, "none"):
+                continue
+            if fmt.get("has_drm"):
+                continue
+
+            seen_urls.add(url)
+            candidates.append(fmt)
+
+        # Some non-YouTube extractors return a single already-selected audio URL
+        # instead of a populated formats list.
+        if not candidates:
+            url = info.get("url")
+            if (
+                url
+                and info.get("acodec") not in (None, "none")
+                and info.get("vcodec") in (None, "none")
+                and not info.get("has_drm")
+            ):
+                return url
+            raise MusicError("Източникът не върна използваем аудио поток.")
+
+        def score(fmt: dict) -> tuple:
+            protocol = str(fmt.get("protocol") or "")
+            directish = int(
+                protocol.startswith("http")
+                or protocol.startswith("m3u8")
+            )
+            return (
+                directish,
+                float(fmt.get("quality") or -1),
+                float(fmt.get("abr") or fmt.get("tbr") or 0),
+                int(fmt.get("asr") or 0),
+            )
+
+        best = max(candidates, key=score)
+        log.info(
+            "Selected audio format %s (%s, %s kbps)",
+            best.get("format_id"),
+            best.get("acodec"),
+            best.get("abr") or best.get("tbr") or "?",
+        )
+        return best["url"]
+
     async def stream_url(self, track: Track) -> tuple[str, str]:
         # Refresh immediately before playback because signed stream URLs can expire
-        # while a song waits in the queue.
+        # while a song waits in the queue. We intentionally do not force a yt-dlp
+        # format selector: authenticated YouTube clients can expose different
+        # format sets because of SABR experiments. Instead, inspect the formats
+        # that are actually available and pick an audio-only URL ourselves.
         info = await self.extract(track.webpage_url)
-        stream = info.get("url")
-        if not stream:
-            raise MusicError("Източникът не върна аудио поток.")
+        stream = self.pick_audio_stream(info)
         return stream, info.get("title") or track.title
 
     async def connect(
