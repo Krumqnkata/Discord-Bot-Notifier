@@ -9,6 +9,7 @@ import main
 from club_admin import install_admin
 from club_fun import ROASTS, SCAMMER_LINES, Settings, install
 from club_music import install as install_music
+from music_admin import install_music_admin
 from club_store import ClubStore
 
 defaults = Settings.from_env()
@@ -25,6 +26,7 @@ store = ClubStore(
 fun = install(main.bot, main.tree, defaults, store)
 music = install_music(main.bot, main.tree)
 install_admin(main, store)
+install_music_admin(main, music)
 
 app = main.app
 notifier_lifespan = app.router.lifespan_context
