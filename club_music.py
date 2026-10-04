@@ -163,43 +163,6 @@ class MusicService:
         )
         return title.strip()
 
-    async def spotify_search_text(self, url: str) -> str:
-        match = SPOTIFY_RE.search(url)
-        if not match:
-            raise MusicError("Невалиден Spotify линк.")
-
-        kind = match.group("kind").lower()
-        if kind != "track":
-            raise MusicError(
-                "Засега Spotify поддръжката е за отделни песни. "
-                "Album и playlist линкове ще добавим отделно."
-            )
-
-        def fetch_oembed() -> str:
-            endpoint = "https://open.spotify.com/oembed?url=" + quote(url, safe="")
-            request = Request(endpoint, headers={"User-Agent": "ITClubDiscordBot/1.0"})
-            with urlopen(request, timeout=10) as response:
-                payload = json.load(response)
-            return str(payload.get("title") or "").strip()
-
-        try:
-            title = await asyncio.wait_for(asyncio.to_thread(fetch_oembed), timeout=12)
-        except Exception as exc:
-            log.warning("Spotify metadata lookup failed: %s", exc)
-            raise MusicError("Не успях да прочета този Spotify линк.") from exc
-
-        if not title:
-            raise MusicError("Spotify не върна заглавие за тази песен.")
-
-        title = re.sub(r"\s*\|\s*Spotify\s*$", "", title, flags=re.IGNORECASE)
-        title = re.sub(
-            r"\s*-\s*song and lyrics by\s+",
-            " ",
-            title,
-            flags=re.IGNORECASE,
-        )
-        return title.strip()
-
     @staticmethod
     def _duration_value(value: str | None) -> int | None:
         if not value or value in {"NA", "None", "null"}:
