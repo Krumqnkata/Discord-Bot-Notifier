@@ -303,7 +303,7 @@ class MusicService:
     async def track_from_query(
         self,
         query: str,
-        requester: discord.Member,
+        requester: discord.Member | str,
     ) -> Track:
         normalized, source_label = await self.normalize_query(query)
         info = await self.extract(normalized)
@@ -317,7 +317,11 @@ class MusicService:
             webpage_url=webpage_url,
             title=info.get("title") or "Неизвестно заглавие",
             duration=info.get("duration"),
-            requested_by=requester.display_name,
+            requested_by=(
+                requester.display_name
+                if isinstance(requester, discord.Member)
+                else str(requester)
+            ),
             source_label=source_label,
         )
 
@@ -691,6 +695,237 @@ class MusicService:
             )
         except MusicError as exc:
             await self.error(interaction, str(exc))
+
+    def _admin_guild(self, guild_id: int) -> discord.Guild:
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            raise MusicError("Discord сървърът не е намерен.")
+        return guild
+
+    def admin_guilds(self) -> list[dict]:
+        result = []
+        for guild in sorted(self.bot.guilds, key=lambda item: item.name.lower()):
+            channels = [
+                {
+                    "id": str(channel.id),
+                    "name": channel.name,
+                }
+                for channel in guild.voice_channels
+            ]
+            result.append(
+                {
+                    "id": str(guild.id),
+                    "name": guild.name,
+                    "voice_channels": channels,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _track_payload(track: Track | None) -> dict | None:
+        if track is None:
+            return None
+        return {
+            "title": track.title,
+            "duration": track.duration_text,
+            "requested_by": track.requested_by,
+            "source": track.source_label,
+            "url": track.webpage_url,
+        }
+
+    async def admin_snapshot(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        async with player.lock:
+            queued = list(player.queue)
+
+        voice = guild.voice_client
+        return {
+            "guild_id": str(guild.id),
+            "guild_name": guild.name,
+            "connected": bool(voice and voice.is_connected()),
+            "voice_channel_id": (
+                str(voice.channel.id)
+                if voice and voice.is_connected() and voice.channel
+                else None
+            ),
+            "voice_channel_name": (
+                voice.channel.name
+                if voice and voice.is_connected() and voice.channel
+                else None
+            ),
+            "playing": bool(voice and voice.is_playing()),
+            "paused": bool(voice and voice.is_paused()),
+            "volume": player.volume,
+            "current": self._track_payload(player.current),
+            "queue": [
+                {"index": index, **self._track_payload(track)}
+                for index, track in enumerate(queued, start=1)
+            ],
+        }
+
+    async def _admin_connect(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+    ) -> discord.VoiceClient:
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.VoiceChannel):
+            raise MusicError("Гласовият канал не е намерен.")
+
+        voice = guild.voice_client
+        player = self.player(guild.id)
+
+        if (
+            voice is not None
+            and (voice.is_playing() or voice.is_paused())
+            and player.current is None
+        ):
+            raise MusicError(
+                "Ботът в момента използва voice канала за друга команда."
+            )
+
+        if voice is not None and voice.is_connected():
+            if voice.channel != channel:
+                try:
+                    await voice.move_to(channel)
+                except discord.DiscordException as exc:
+                    raise MusicError(
+                        "Не успях да преместя бота в избрания voice канал."
+                    ) from exc
+            return voice
+
+        perms = channel.permissions_for(guild.me)
+        if not (perms.view_channel and perms.connect and perms.speak):
+            raise MusicError(
+                "Ботът се нуждае от View Channel, Connect и Speak."
+            )
+
+        try:
+            return await channel.connect(
+                timeout=20,
+                reconnect=True,
+                self_deaf=True,
+            )
+        except discord.DiscordException as exc:
+            raise MusicError(
+                "Не успях да се свържа с гласовия канал."
+            ) from exc
+
+    async def admin_play(
+        self,
+        guild_id: int,
+        voice_channel_id: int,
+        query: str,
+    ) -> dict:
+        guild = self._admin_guild(guild_id)
+        player = self.player(guild_id)
+
+        async with player.lock:
+            if len(player.queue) >= MAX_QUEUE_SIZE:
+                raise MusicError(
+                    f"Опашката е пълна ({MAX_QUEUE_SIZE} песни)."
+                )
+
+        track = await self.track_from_query(query, "Уеб панел")
+        voice = await self._admin_connect(guild, voice_channel_id)
+        was_idle = (
+            not voice.is_playing()
+            and not voice.is_paused()
+            and player.current is None
+        )
+
+        async with player.lock:
+            player.queue.append(track)
+
+        self.ensure_worker(guild)
+        return {
+            "title": track.title,
+            "duration": track.duration_text,
+            "started": was_idle,
+        }
+
+    async def admin_pause(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        if voice is None or not voice.is_playing():
+            raise MusicError("В момента няма песен, която да паузирам.")
+        voice.pause()
+        return {"paused": True}
+
+    async def admin_resume(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        if voice is None or not voice.is_paused():
+            raise MusicError("Музиката не е на пауза.")
+        voice.resume()
+        return {"paused": False}
+
+    async def admin_skip(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        if voice is None or not (voice.is_playing() or voice.is_paused()):
+            raise MusicError("Няма активна песен за прескачане.")
+        voice.stop()
+        return {"skipped": True}
+
+    async def admin_clear_queue(self, guild_id: int) -> dict:
+        self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        async with player.lock:
+            removed = len(player.queue)
+            player.queue.clear()
+        return {"removed": removed}
+
+    async def admin_remove(self, guild_id: int, index: int) -> dict:
+        self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        async with player.lock:
+            items = list(player.queue)
+            if index < 1 or index > len(items):
+                raise MusicError("Тази позиция вече не съществува в опашката.")
+            removed = items.pop(index - 1)
+            player.queue = deque(items)
+        return {"title": removed.title}
+
+    async def admin_set_volume(self, guild_id: int, percent: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        player = self.player(guild_id)
+        player.volume = max(0, min(100, int(percent)))
+
+        voice = guild.voice_client
+        if (
+            voice is not None
+            and isinstance(voice.source, discord.PCMVolumeTransformer)
+        ):
+            voice.source.volume = player.volume / 100
+
+        return {"volume": player.volume}
+
+    async def admin_leave(self, guild_id: int) -> dict:
+        guild = self._admin_guild(guild_id)
+        voice = guild.voice_client
+        player = self.player(guild_id)
+        player.stopping = True
+
+        async with player.lock:
+            player.queue.clear()
+
+        if voice is not None and (voice.is_playing() or voice.is_paused()):
+            voice.stop()
+
+        if player.worker:
+            player.worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await player.worker
+            player.worker = None
+
+        if voice is not None and voice.is_connected():
+            await voice.disconnect(force=True)
+
+        player.current = None
+        player.stopping = False
+        return {"disconnected": True}
 
     async def close(self):
         for player in self.players.values():
