@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 from typing import Deque
 from urllib.parse import quote
@@ -22,41 +21,15 @@ from urllib.request import Request, urlopen
 
 import discord
 from discord import app_commands
-import yt_dlp
 
 log = logging.getLogger(__name__)
-
-POT_PROVIDER_URL = os.getenv(
-    "MUSIC_POT_PROVIDER_URL",
-    "http://127.0.0.1:4416",
-).strip()
 
 COOKIE_FILE = os.getenv(
     "MUSIC_YTDLP_COOKIES",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube-cookies.txt"),
 ).strip()
 
-YTDLP_OPTIONS = {
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "default_search": "ytsearch1",
-    "skip_download": True,
-    "extract_flat": False,
-    "source_address": "0.0.0.0",
-    # Keep the PO-token provider available, but let yt-dlp choose the YouTube
-    # client automatically. Account cookies currently work with the default
-    # client selection on this VPS, while forcing mweb can trigger LOGIN_REQUIRED.
-    "extractor_args": {
-        "youtubepot-bgutilhttp": {
-            "base_url": [POT_PROVIDER_URL],
-        },
-    },
-}
-
-if COOKIE_FILE and os.path.isfile(COOKIE_FILE):
-    YTDLP_OPTIONS["cookiefile"] = COOKIE_FILE
-else:
+if not (COOKIE_FILE and os.path.isfile(COOKIE_FILE)):
     log.warning(
         "Music cookie file not found at %s; YouTube may reject VPS requests",
         COOKIE_FILE,
@@ -70,6 +43,11 @@ DEFAULT_VOLUME = max(0, min(100, int(os.getenv("MUSIC_DEFAULT_VOLUME", "60"))))
 
 SPOTIFY_RE = re.compile(
     r"https?://(?:open\.)?spotify\.com/(?P<kind>track|album|playlist)/(?P<id>[A-Za-z0-9]+)",
+    re.IGNORECASE,
+)
+
+YOUTUBE_VIDEO_RE = re.compile(
+    r"https?://(?:(?:www\.)?youtube\.com/(?:watch\?v=|shorts/|live/|embed/)|youtu\.be/)(?P<id>[A-Za-z0-9_-]{6,})",
     re.IGNORECASE,
 )
 
@@ -185,144 +163,165 @@ class MusicService:
         )
         return title.strip()
 
-    async def normalize_query(self, query: str) -> tuple[str, str]:
-        query = query.strip()
-        if not query:
-            raise MusicError("Напиши име на песен или постави линк.")
+    async def spotify_search_text(self, url: str) -> str:
+        match = SPOTIFY_RE.search(url)
+        if not match:
+            raise MusicError("Невалиден Spotify линк.")
 
-        spotify_match = SPOTIFY_RE.search(query)
-        if spotify_match:
-            search_text = await self.spotify_search_text(query)
-            return f"ytsearch1:{search_text}", "Spotify → YouTube"
-
-        if re.match(r"^https?://", query, flags=re.IGNORECASE):
-            return query, "YouTube/линк"
-
-        return f"ytsearch1:{query}", "YouTube/търсене"
-
-    async def _run_ydl(self, query: str, *, process: bool, options: dict | None = None) -> dict:
-        if not shutil.which("ffmpeg"):
+        kind = match.group("kind").lower()
+        if kind != "track":
             raise MusicError(
-                "Липсва FFmpeg на сървъра. Инсталирай: sudo apt install ffmpeg"
+                "Засега Spotify поддръжката е за отделни песни. "
+                "Album и playlist линкове ще добавим отделно."
             )
 
-        opts = dict(YTDLP_OPTIONS)
-        if options:
-            opts.update(options)
-
-        def do_extract():
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(
-                    query,
-                    download=False,
-                    process=process,
-                )
+        def fetch_oembed() -> str:
+            endpoint = "https://open.spotify.com/oembed?url=" + quote(url, safe="")
+            request = Request(endpoint, headers={"User-Agent": "ITClubDiscordBot/1.0"})
+            with urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+            return str(payload.get("title") or "").strip()
 
         try:
-            info = await asyncio.wait_for(asyncio.to_thread(do_extract), timeout=30)
-        except asyncio.TimeoutError as exc:
-            raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
+            title = await asyncio.wait_for(asyncio.to_thread(fetch_oembed), timeout=12)
         except Exception as exc:
-            log.warning(
-                "yt-dlp lookup failed for %r (process=%s): %s",
-                query,
-                process,
-                exc,
-            )
-            raise MusicError(
-                "Не успях да намеря или отворя този аудио източник."
-            ) from exc
+            log.warning("Spotify metadata lookup failed: %s", exc)
+            raise MusicError("Не успях да прочета този Spotify линк.") from exc
 
-        if not info:
-            raise MusicError("Няма намерен резултат.")
-        return info
+        if not title:
+            raise MusicError("Spotify не върна заглавие за тази песен.")
 
-    async def extract_search_result(self, query: str) -> dict:
-        """Resolve ytsearch without processing the selected video's formats."""
-        info = await self._run_ydl(
-            query,
-            process=True,
-            options={
-                "extract_flat": "in_playlist",
-                "playlistend": 1,
-            },
+        title = re.sub(r"\s*\|\s*Spotify\s*$", "", title, flags=re.IGNORECASE)
+        title = re.sub(
+            r"\s*-\s*song and lyrics by\s+",
+            " ",
+            title,
+            flags=re.IGNORECASE,
         )
+        return title.strip()
 
-        entries = [entry for entry in (info.get("entries") or []) if entry]
-        if not entries:
-            raise MusicError("Няма намерен резултат.")
+    @staticmethod
+    def _duration_value(value: str | None) -> int | None:
+        if not value or value in {"NA", "None", "null"}:
+            return None
+        try:
+            return max(0, int(float(value)))
+        except (TypeError, ValueError):
+            return None
 
-        entry = entries[0]
-        url = entry.get("webpage_url") or entry.get("url")
-
-        # Flat YouTube search entries can expose only the video ID in url.
-        if (
-            url
-            and not str(url).startswith(("http://", "https://"))
-            and (entry.get("extractor_key") == "Youtube" or entry.get("ie_key") == "Youtube")
-        ):
-            url = f"https://www.youtube.com/watch?v={url}"
-
-        if not url:
-            raise MusicError("Търсенето не върна използваем линк.")
-
-        return await self.extract_raw(str(url))
-
-    async def extract_raw(self, query: str) -> dict:
-        """Extract metadata without running yt-dlp's format selector."""
-        info = await self._run_ydl(
-            query,
-            process=False,
-            options={"extract_flat": False},
-        )
-
-        # Resolve transparent URL wrappers while still avoiding format selection.
-        for _ in range(3):
-            if not isinstance(info, dict):
-                break
-            if info.get("_type") not in {"url", "url_transparent"}:
-                break
-            next_url = info.get("url")
-            if not next_url:
-                break
-            info = await self._run_ydl(
-                str(next_url),
-                process=False,
-                options={"extract_flat": False},
+    async def youtube_oembed_title(self, url: str) -> str:
+        def fetch() -> str:
+            endpoint = (
+                "https://www.youtube.com/oembed?format=json&url="
+                + quote(url, safe="")
             )
+            request = Request(endpoint, headers={"User-Agent": "ITClubDiscordBot/1.0"})
+            with urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+            return str(payload.get("title") or "").strip()
 
-        if not isinstance(info, dict):
-            raise MusicError("Източникът върна неочакван резултат.")
-        return info
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fetch), timeout=12)
+        except Exception as exc:
+            log.info("YouTube oEmbed metadata unavailable for %r: %s", url, exc)
+            return ""
 
-    async def extract(self, query: str) -> dict:
-        if query.startswith(("ytsearch:", "ytsearch1:", "ytsearch2:", "ytsearch3:")):
-            return await self.extract_search_result(query)
-        return await self.extract_raw(query)
+    async def cli_search_track(
+        self,
+        search_text: str,
+        requester_name: str,
+        source_label: str,
+    ) -> Track:
+        base = self._cli_base_args()
+        template = "%(id)s\t%(title)s\t%(duration)s\t%(webpage_url)s"
+        out, _ = await self._run_cli([
+            *base,
+            "--flat-playlist",
+            "--playlist-end", "1",
+            "--print", template,
+            f"ytsearch1:{search_text}",
+        ])
+
+        rows = [
+            line.strip()
+            for line in out.splitlines()
+            if line.strip() and not line.lstrip().startswith("[")
+        ]
+        if not rows:
+            raise MusicError("YouTube търсенето не върна резултат.")
+
+        parts = rows[-1].split("\t", 3)
+        if len(parts) < 2:
+            raise MusicError("Не успях да прочета резултата от YouTube търсенето.")
+
+        video_id = parts[0].strip()
+        title = parts[1].strip() or "Неизвестно заглавие"
+        duration = self._duration_value(parts[2].strip() if len(parts) > 2 else None)
+        webpage_url = parts[3].strip() if len(parts) > 3 else ""
+        if not webpage_url or webpage_url in {"NA", "None"}:
+            webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+
+        return Track(
+            query=search_text,
+            webpage_url=webpage_url,
+            title=title,
+            duration=duration,
+            requested_by=requester_name,
+            source_label=source_label,
+        )
 
     async def track_from_query(
         self,
         query: str,
         requester: discord.Member | str,
     ) -> Track:
-        normalized, source_label = await self.normalize_query(query)
-        info = await self.extract(normalized)
-        webpage_url = (
-            info.get("webpage_url")
-            or info.get("original_url")
-            or normalized
+        query = query.strip()
+        if not query:
+            raise MusicError("Напиши име на песен или постави линк.")
+
+        requester_name = (
+            requester.display_name
+            if isinstance(requester, discord.Member)
+            else str(requester)
         )
-        return Track(
-            query=query,
-            webpage_url=webpage_url,
-            title=info.get("title") or "Неизвестно заглавие",
-            duration=info.get("duration"),
-            requested_by=(
-                requester.display_name
-                if isinstance(requester, discord.Member)
-                else str(requester)
-            ),
-            source_label=source_label,
+
+        spotify_match = SPOTIFY_RE.search(query)
+        if spotify_match:
+            search_text = await self.spotify_search_text(query)
+            return await self.cli_search_track(
+                search_text,
+                requester_name,
+                "Spotify → YouTube",
+            )
+
+        youtube_match = YOUTUBE_VIDEO_RE.search(query)
+        if youtube_match:
+            title = await self.youtube_oembed_title(query)
+            return Track(
+                query=query,
+                webpage_url=query,
+                title=title or f"YouTube видео {youtube_match.group('id')}",
+                duration=None,
+                requested_by=requester_name,
+                source_label="YouTube/линк",
+            )
+
+        if re.match(r"^https?://", query, flags=re.IGNORECASE):
+            # Keep other yt-dlp-supported URLs usable. Stream resolution is
+            # still done by the proven yt-dlp CLI path.
+            return Track(
+                query=query,
+                webpage_url=query,
+                title=query,
+                duration=None,
+                requested_by=requester_name,
+                source_label="Външен линк",
+            )
+
+        return await self.cli_search_track(
+            query,
+            requester_name,
+            "YouTube/търсене",
         )
 
     async def _run_cli(self, args: list[str], *, timeout: int = 35) -> tuple[str, str]:
