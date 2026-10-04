@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from typing import Deque
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -75,19 +76,6 @@ SPOTIFY_RE = re.compile(
 
 class MusicError(Exception):
     """Short error safe to show to a Discord user."""
-
-
-class FormatProbeYDL(yt_dlp.YoutubeDL):
-    """Capture the processed format table before yt-dlp selects a format."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.probed_info: dict | None = None
-
-    def list_formats(self, info_dict):
-        # yt-dlp calls this after it has normalized/sorted formats and attached
-        # direct media URLs, but before normal format selection happens.
-        self.probed_info = info_dict
 
 
 @dataclass(slots=True)
@@ -281,46 +269,30 @@ class MusicService:
         return await self.extract_raw(str(url))
 
     async def extract_raw(self, query: str) -> dict:
-        """Use yt-dlp's -F processing path and capture its processed formats."""
-        opts = dict(YTDLP_OPTIONS)
-        opts.pop("format", None)
-        opts.update({
-            "extract_flat": False,
-            "listformats": True,
-            "simulate": True,
-        })
+        """Extract metadata without running yt-dlp's format selector."""
+        info = await self._run_ydl(
+            query,
+            process=False,
+            options={"extract_flat": False},
+        )
 
-        def do_probe():
-            with FormatProbeYDL(opts) as ydl:
-                result = ydl.extract_info(
-                    query,
-                    download=False,
-                    process=True,
-                )
-                return ydl.probed_info or result
-
-        try:
-            info = await asyncio.wait_for(
-                asyncio.to_thread(do_probe),
-                timeout=30,
+        # Resolve transparent URL wrappers while still avoiding format selection.
+        for _ in range(3):
+            if not isinstance(info, dict):
+                break
+            if info.get("_type") not in {"url", "url_transparent"}:
+                break
+            next_url = info.get("url")
+            if not next_url:
+                break
+            info = await self._run_ydl(
+                str(next_url),
+                process=False,
+                options={"extract_flat": False},
             )
-        except asyncio.TimeoutError as exc:
-            raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
-        except Exception as exc:
-            log.warning("yt-dlp format probe failed for %r: %s", query, exc)
-            raise MusicError(
-                "Не успях да прочета наличните формати за този източник."
-            ) from exc
 
         if not isinstance(info, dict):
-            raise MusicError("Източникът не върна информация за формати.")
-
-        formats = info.get("formats") or []
-        log.info(
-            "yt-dlp format probe for %s returned %s formats",
-            info.get("id") or query,
-            len(formats),
-        )
+            raise MusicError("Източникът върна неочакван резултат.")
         return info
 
     async def extract(self, query: str) -> dict:
@@ -349,91 +321,103 @@ class MusicService:
             source_label=source_label,
         )
 
-    @staticmethod
-    def pick_audio_stream(info: dict) -> str:
-        """Pick a directly playable stream containing audio."""
-        pools = [
-            info.get("requested_formats") or [],
-            info.get("formats") or [],
-            info.get("requested_downloads") or [],
-        ]
+    async def _run_cli(self, args: list[str], *, timeout: int = 35) -> tuple[str, str]:
+        """Run the same yt-dlp CLI installed in this Python environment."""
+        cmd = [sys.executable, "-m", "yt_dlp", *args]
+        env = os.environ.copy()
 
-        candidates = []
-        seen_urls = set()
-        for pool in pools:
-            for fmt in pool:
-                if not isinstance(fmt, dict):
-                    continue
-                url = fmt.get("url")
-                if not url or url in seen_urls or fmt.get("has_drm"):
-                    continue
+        # Deno was installed for the krum account on this VPS. Preserve PATH,
+        # but also add the common per-user Deno location when present.
+        deno_dir = os.getenv("MUSIC_DENO_DIR", "/home/krum/.deno/bin")
+        if deno_dir and os.path.isdir(deno_dir):
+            env["PATH"] = deno_dir + os.pathsep + env.get("PATH", "")
 
-                acodec = fmt.get("acodec")
-                # Explicitly reject video-only streams. If acodec is unknown,
-                # accept audio-looking containers/protocols as a fallback.
-                if acodec == "none":
-                    continue
-                if acodec is None:
-                    ext = str(fmt.get("ext") or "").lower()
-                    if ext not in {"m4a", "mp3", "aac", "opus", "ogg", "webm"}:
-                        continue
-
-                seen_urls.add(url)
-                candidates.append(fmt)
-
-        # yt-dlp may return a single selected URL at the top level.
-        top_url = info.get("url")
-        if top_url and not info.get("has_drm"):
-            top_acodec = info.get("acodec")
-            if top_acodec != "none":
-                top = dict(info)
-                top["url"] = top_url
-                if top_url not in seen_urls:
-                    candidates.append(top)
-
-        if not candidates:
-            log.warning(
-                "No playable audio URL. requested_formats=%s formats=%s requested_downloads=%s "
-                "top_url=%s acodec=%s vcodec=%s",
-                len(info.get("requested_formats") or []),
-                len(info.get("formats") or []),
-                len(info.get("requested_downloads") or []),
-                bool(info.get("url")),
-                info.get("acodec"),
-                info.get("vcodec"),
-            )
-            raise MusicError("Източникът не върна използваем аудио поток.")
-
-        def score(fmt: dict) -> tuple:
-            # Prefer audio-only, then direct HTTP/HLS, then quality/bitrate.
-            audio_only = int(fmt.get("vcodec") in (None, "none"))
-            protocol = str(fmt.get("protocol") or "")
-            directish = int(protocol.startswith("http") or protocol.startswith("m3u8"))
-            return (
-                audio_only,
-                directish,
-                float(fmt.get("quality") or -1),
-                float(fmt.get("abr") or fmt.get("tbr") or 0),
-                int(fmt.get("asr") or 0),
-            )
-
-        best = max(candidates, key=score)
-        log.info(
-            "Selected audio source format=%s acodec=%s vcodec=%s protocol=%s bitrate=%s",
-            best.get("format_id"),
-            best.get("acodec"),
-            best.get("vcodec"),
-            best.get("protocol"),
-            best.get("abr") or best.get("tbr") or "?",
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
-        return best["url"]
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            raise MusicError("yt-dlp отне твърде дълго. Опитай пак.")
+
+        out = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            detail = (err or out).strip().splitlines()
+            last = detail[-1] if detail else f"exit {process.returncode}"
+            raise MusicError(f"yt-dlp CLI грешка: {last}")
+        return out, err
+
+    def _cli_base_args(self) -> list[str]:
+        args = ["--no-playlist", "--no-color"]
+        if COOKIE_FILE and os.path.isfile(COOKIE_FILE):
+            args += ["--cookies", COOKIE_FILE]
+        return args
+
+    @staticmethod
+    def _choose_format_from_table(table: str) -> str:
+        """Choose a format ID from yt-dlp -F output (which is sorted worst→best)."""
+        audio_only: list[str] = []
+        combined: list[str] = []
+
+        for raw_line in table.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("["):
+                continue
+
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            format_id, ext, rest = parts
+            if format_id.upper() == "ID" or ext.upper() == "EXT":
+                continue
+
+            lower = line.lower()
+            if any(word in lower for word in ("storyboard", "images", "mhtml")):
+                continue
+            if "video only" in lower:
+                continue
+
+            if "audio only" in lower:
+                audio_only.append(format_id)
+            else:
+                # A normal muxed row from -F contains both video and audio.
+                combined.append(format_id)
+
+        if audio_only:
+            return audio_only[-1]
+        if combined:
+            return combined[-1]
+        raise MusicError("yt-dlp -F не показа формат с аудио.")
+
+    async def cli_stream_url(self, url: str) -> str:
+        """Resolve a stream by reproducing the yt-dlp CLI path that works on the VPS."""
+        base = self._cli_base_args()
+
+        table, _ = await self._run_cli([*base, "-F", url])
+        format_id = self._choose_format_from_table(table)
+        log.info("yt-dlp CLI selected format %s for %s", format_id, url)
+
+        out, _ = await self._run_cli([*base, "-f", format_id, "-g", url])
+        urls = [
+            line.strip()
+            for line in out.splitlines()
+            if line.strip().startswith(("http://", "https://"))
+        ]
+        if not urls:
+            raise MusicError(
+                f"yt-dlp показа формат {format_id}, но не върна директен URL."
+            )
+        return urls[-1]
 
     async def stream_url(self, track: Track) -> tuple[str, str]:
-        # Refresh immediately before playback because signed stream URLs can expire.
-        # extract_raw uses yt-dlp's list-formats path, so no format selector runs.
-        info = await self.extract(track.webpage_url)
-        stream = self.pick_audio_stream(info)
-        return stream, info.get("title") or track.title
+        stream = await self.cli_stream_url(track.webpage_url)
+        return stream, track.title
 
     async def connect(
         self,
