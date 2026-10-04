@@ -1,8 +1,9 @@
-# Music add-on: YouTube PO Token setup
+# Music add-on setup
 
-The music add-on uses yt-dlp plus the bgutil PO Token provider so the bot can
-play YouTube audio from a VPS without using a personal Google account or
-exported browser cookies.
+The music add-on uses yt-dlp, Deno/EJS, the bgutil PO Token provider and a
+dedicated YouTube account cookie export. On this VPS, anonymous YouTube
+requests are rejected with LOGIN_REQUIRED, while authenticated requests using
+the cookie file work.
 
 ## 1. Install/update Python packages
 
@@ -12,9 +13,7 @@ source venv/bin/activate
 python -m pip install -U -r requirements-club.txt
 ```
 
-## 2. Start the PO Token provider
-
-The simplest option is Docker. It listens only on localhost:
+## 2. Keep the PO Token provider running
 
 ```bash
 docker run -d \
@@ -25,35 +24,64 @@ docker run -d \
   brainicism/bgutil-ytdlp-pot-provider
 ```
 
+If it already exists:
+
+```bash
+docker start bgutil-provider
+```
+
 Check it:
 
 ```bash
 docker ps --filter name=bgutil-provider
-docker logs --tail 50 bgutil-provider
+curl http://127.0.0.1:4416/ping
 ```
 
-The bot defaults to:
+## 3. YouTube cookies
+
+Place the Netscape-format cookie export at:
 
 ```text
-http://127.0.0.1:4416
+/home/krum/itc-notif/youtube-cookies.txt
 ```
 
-To use another provider URL, add this to .env:
+Protect it:
+
+```bash
+chmod 600 /home/krum/itc-notif/youtube-cookies.txt
+```
+
+The file is ignored by git and must never be committed.
+
+The default path can be overridden in .env:
 
 ```dotenv
+MUSIC_YTDLP_COOKIES=/home/krum/itc-notif/youtube-cookies.txt
 MUSIC_POT_PROVIDER_URL=http://127.0.0.1:4416
 ```
 
-## 3. Verify yt-dlp sees the provider
+## 4. Verify YouTube manually
 
 ```bash
-source ~/itc-notif/venv/bin/activate
-yt-dlp -v "https://www.youtube.com/watch?v=JZC4RHVdiWA"
+cd ~/itc-notif
+source venv/bin/activate
+yt-dlp -v \
+  --cookies /home/krum/itc-notif/youtube-cookies.txt \
+  "https://www.youtube.com/watch?v=JZC4RHVdiWA"
 ```
 
-The verbose output should list a bgutil PO Token provider.
+Successful output should contain:
 
-## 4. Restart the existing bot service
+```text
+Found YouTube account cookies
+```
+
+and should proceed to select/download media formats instead of returning
+LOGIN_REQUIRED.
+
+## 5. Restart the bot
+
+Restart the systemd service that runs run_club.py, then follow its log.
 
 ```bash
 sudo systemctl restart YOUR-SERVICE-NAME
@@ -72,10 +100,9 @@ or:
 /music play Avicii Wake Me Up
 ```
 
-## Notes
+## Security
 
-- No Google login or cookies are required by this setup.
-- The provider can help with YouTube bot checks and 403 responses, but it cannot
-  guarantee that an aggressively blocked datacenter IP will always work.
-- Keep the provider bound to 127.0.0.1 unless you have a specific reason to
-  expose it.
+Treat youtube-cookies.txt like a password/session token. Do not paste it into
+chat, commit it to GitHub, or share it. Use a dedicated Google/YouTube account
+for the bot because automated access can cause the account to be challenged or
+restricted.
