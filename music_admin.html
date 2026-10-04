@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Музика • ИТ клуб</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151f34;--panel2:#10192b;--line:#2c3854;--muted:#9eabc7;--ink:#eef3ff;--accent:#8f8cff;--green:#75d69c;--red:#ff9aad;--amber:#f2cb75}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top left,#24214f,var(--bg) 62%);color:var(--ink);font:15px/1.55 system-ui,sans-serif;min-height:100vh}
+main{max-width:1180px;margin:auto;padding:26px 22px 64px}a{color:#b8b4ff;text-decoration:none}a:hover{text-decoration:underline}
+header,.row,.toolbar,.controls,.now-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header,.toolbar,.now-head{justify-content:space-between}
+header{margin-bottom:28px}.nav{display:flex;gap:14px;flex-wrap:wrap}.eyebrow{font-size:12px;letter-spacing:.16em;color:#b5aaff;font-weight:800}
+h1{font-size:clamp(30px,5vw,46px);line-height:1.08;margin:10px 0}h2{font-size:20px;margin:0}p{color:var(--muted);margin:7px 0}
+.card{background:linear-gradient(120deg,#1a2540,var(--panel));border:1px solid var(--line);border-radius:17px;padding:22px;margin:16px 0;box-shadow:0 14px 34px #0003}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+label span{display:block;color:var(--muted);font-size:13px;margin-bottom:6px}select,input,button{font:inherit}
+select,input[type=text]{width:100%;padding:11px 12px;border:1px solid #3b4867;background:#0d1628;color:var(--ink);border-radius:10px}
+button{padding:10px 15px;border:1px solid var(--line);background:#202b45;color:var(--ink);border-radius:10px;cursor:pointer;font-weight:700}
+button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}.primary{background:#9c90ff;color:#171128;border-color:#9c90ff}.danger{color:#ffb2bf}.warn{color:#f2d18a}
+.status{padding:11px 14px;border-radius:10px;border:1px solid #3b7855;background:#143425;margin:12px 0}.status.error{background:#40202b;border-color:#a94f67}.status[hidden]{display:none}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:999px;background:#273252;color:#dce3ff;font-size:12px}.badge.on{background:#173b2a;color:#a9e8bf}.badge.pause{background:#44391f;color:#f5d689}
+.now-title{font-size:23px;font-weight:800;margin-top:8px;overflow-wrap:anywhere}.muted{color:var(--muted)}.small{font-size:13px}.queue{display:grid;gap:9px;margin-top:14px}.queue-item{display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px}.qnum{font-weight:800;color:#aaa7ff}.qtitle{font-weight:700;overflow-wrap:anywhere}
+.range-wrap{display:grid;grid-template-columns:1fr 70px;gap:12px;align-items:center}input[type=range]{width:100%;accent-color:#9c90ff}.volume-value{text-align:center;font-weight:800;background:#111a2d;padding:7px;border-radius:9px}
+.empty{padding:25px;text-align:center;color:var(--muted);border:1px dashed #39445f;border-radius:12px}
+footer{margin-top:30px;color:var(--muted);font-size:12px}
+@media(max-width:760px){main{padding:18px 13px 45px}.grid,.grid3{grid-template-columns:1fr}.card{padding:17px}.queue-item{grid-template-columns:34px 1fr}.queue-item button{grid-column:2}}
+</style>
+</head>
+<body><main>
+<header>
+  <div class="nav"><a href="../">← Сбирки</a><a href="../fun/">🎙 Забавни команди</a></div>
+  <button id="logout" type="button">Изход</button>
+</header>
+<div class="eyebrow">ИТ КЛУБ / DISCORD MUSIC</div>
+<h1>Музикален контролен панел</h1>
+<p>Управлявай музиката в voice каналите без да пишеш Discord команди.</p>
+<div id="status" class="status" role="status" hidden></div>
+
+<section class="card">
+  <div class="grid">
+    <label><span>Discord сървър</span><select id="guild"></select></label>
+    <label><span>Voice канал</span><select id="channel"></select></label>
+  </div>
+</section>
+
+<section class="card">
+  <form id="play-form">
+    <label><span>Песен, YouTube линк или Spotify track линк</span>
+      <input id="query" type="text" maxlength="500" placeholder="Напр. Avicii Wake Me Up" autocomplete="off" required>
+    </label>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="play" type="submit">▶ Пусни / добави</button>
+      <span class="muted small">Spotify playlist и album линкове още не се поддържат.</span>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="now-head">
+    <div><h2>Сега свири</h2><p id="connection">Не е свързан с voice канал.</p></div>
+    <div id="play-state" class="badge">OFFLINE</div>
+  </div>
+  <div id="now">
+    <div class="empty">В момента няма активна песен.</div>
+  </div>
+  <div class="controls" style="margin-top:16px">
+    <button id="pause" type="button">⏸ Пауза</button>
+    <button id="resume" type="button">▶ Продължи</button>
+    <button id="skip" type="button">⏭ Skip</button>
+    <button id="leave" type="button" class="danger">⏹ Stop & Leave</button>
+  </div>
+</section>
+
+<section class="card">
+  <div class="toolbar"><div><h2>Сила на звука</h2><p>Промяната важи веднага и се запазва за следващите песни.</p></div></div>
+  <div class="range-wrap">
+    <input id="volume" type="range" min="0" max="100" step="1" value="60">
+    <div id="volume-value" class="volume-value">60%</div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="toolbar">
+    <div><h2>Опашка</h2><p id="queue-count">0 песни</p></div>
+    <div class="row"><button id="refresh" type="button">↻ Обнови</button><button id="clear" type="button" class="warn">Изчисти опашката</button></div>
+  </div>
+  <div id="queue" class="queue"></div>
+</section>
+
+<footer>Статусът се обновява автоматично. Панелът използва същата защитена админ сесия като останалите раздели.</footer>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let guilds=[], currentGuild=null, busy=false, pollTimer=null;
+
+function notice(message,error=false){
+  const box=$('status'); box.textContent=message; box.hidden=false; box.className='status'+(error?' error':'');
+  clearTimeout(notice.timer); notice.timer=setTimeout(()=>{box.hidden=true},4500);
+}
+function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+async function api(path,method='GET',data){
+  const options={method,headers:{'X-Music-Panel':'1'}};
+  if(data!==undefined){options.headers['Content-Type']='application/json';options.body=JSON.stringify(data);}
+  const response=await fetch('api/'+path,options);
+  let result={};
+  try{result=await response.json();}catch{}
+  if(response.status===401){window.location.href='../';throw Error('Сесията е изтекла.');}
+  if(!response.ok){
+    const detail=result.detail;
+    if(Array.isArray(detail)) throw Error('Провери въведените стойности.');
+    throw Error(detail||result.message||'Грешка при заявката.');
+  }
+  return result;
+}
+
+function selectedGuild(){
+  return guilds.find(g=>g.id===$('guild').value);
+}
+function fillChannels(preferred){
+  const guild=selectedGuild(); const select=$('channel'); select.replaceChildren();
+  const channels=guild?.voice_channels||[];
+  if(!channels.length){const o=document.createElement('option');o.textContent='Няма voice канали';o.value='';select.append(o);return;}
+  for(const channel of channels){const o=document.createElement('option');o.value=channel.id;o.textContent=channel.name;select.append(o);}
+  if(preferred && channels.some(c=>c.id===String(preferred))) select.value=String(preferred);
+}
+async function bootstrap(){
+  const data=await api('bootstrap');
+  guilds=data.guilds||[];
+  const select=$('guild'); select.replaceChildren();
+  for(const guild of guilds){const o=document.createElement('option');o.value=guild.id;o.textContent=guild.name;select.append(o);}
+  if(!guilds.length){const o=document.createElement('option');o.textContent='Ботът няма Discord сървъри';o.value='';select.append(o);fillChannels();return;}
+  currentGuild=select.value; fillChannels(); await refreshStatus();
+}
+function renderStatus(data){
+  const state=$('play-state');
+  if(!data.connected){state.textContent='OFFLINE';state.className='badge';$('connection').textContent='Не е свързан с voice канал.';}
+  else{
+    $('connection').textContent='Voice канал: '+(data.voice_channel_name||'неизвестен');
+    if(data.paused){state.textContent='PAUSED';state.className='badge pause';}
+    else if(data.playing){state.textContent='PLAYING';state.className='badge on';}
+    else{state.textContent='CONNECTED';state.className='badge on';}
+    fillChannels(data.voice_channel_id);
+  }
+  if(data.current){
+    $('now').innerHTML='<div class="now-title">'+esc(data.current.title)+'</div>'+
+      '<p>'+esc(data.current.duration)+' · заявено от '+esc(data.current.requested_by)+' · '+esc(data.current.source)+'</p>';
+  }else $('now').innerHTML='<div class="empty">В момента няма активна песен.</div>';
+
+  $('volume').value=data.volume; $('volume-value').textContent=data.volume+'%';
+  const queue=data.queue||[]; $('queue-count').textContent=queue.length+' '+(queue.length===1?'песен':'песни');
+  const wrap=$('queue'); wrap.replaceChildren();
+  if(!queue.length){wrap.innerHTML='<div class="empty">Опашката е празна.</div>';}
+  else{
+    for(const item of queue){
+      const row=document.createElement('div');row.className='queue-item';
+      row.innerHTML='<div class="qnum">#'+item.index+'</div><div><div class="qtitle">'+esc(item.title)+'</div><div class="muted small">'+esc(item.duration)+' · '+esc(item.requested_by)+'</div></div>';
+      const button=document.createElement('button');button.type='button';button.textContent='Махни';button.className='danger';
+      button.onclick=()=>removeItem(item.index);row.append(button);wrap.append(row);
+    }
+  }
+  $('pause').disabled=!data.playing;
+  $('resume').disabled=!data.paused;
+  $('skip').disabled=!(data.playing||data.paused);
+  $('leave').disabled=!data.connected;
+  $('clear').disabled=!queue.length;
+}
+async function refreshStatus(){
+  const guildId=$('guild').value;if(!guildId)return;
+  try{const data=await api('status?guild_id='+encodeURIComponent(guildId));renderStatus(data);}
+  catch(error){notice(error.message,true);}
+}
+async function action(path,data,message){
+  if(busy)return;busy=true;
+  try{const result=await api(path,'POST',data);notice(result.message||message);await refreshStatus();}
+  catch(error){notice(error.message,true);}
+  finally{busy=false;}
+}
+$('guild').addEventListener('change',async()=>{currentGuild=$('guild').value;fillChannels();await refreshStatus();});
+$('play-form').addEventListener('submit',async event=>{
+  event.preventDefault();const guild_id=$('guild').value,voice_channel_id=$('channel').value,query=$('query').value.trim();
+  if(!guild_id||!voice_channel_id||!query)return;
+  await action('play',{guild_id,voice_channel_id,query},'Добавено.');
+  $('query').select();
+});
+$('pause').onclick=()=>action('pause',{guild_id:$('guild').value});
+$('resume').onclick=()=>action('resume',{guild_id:$('guild').value});
+$('skip').onclick=()=>action('skip',{guild_id:$('guild').value});
+$('clear').onclick=()=>action('clear',{guild_id:$('guild').value});
+$('leave').onclick=()=>{if(confirm('Да спра ли музиката, да изчистя опашката и ботът да излезе?'))action('leave',{guild_id:$('guild').value});};
+$('refresh').onclick=refreshStatus;
+async function removeItem(index){await action('remove',{guild_id:$('guild').value,index});}
+let volumeTimer;
+$('volume').addEventListener('input',()=>{$('volume-value').textContent=$('volume').value+'%';clearTimeout(volumeTimer);volumeTimer=setTimeout(()=>action('volume',{guild_id:$('guild').value,percent:Number($('volume').value)}),300);});
+$('logout').onclick=async()=>{try{await fetch('../logout',{method:'POST'});}finally{window.location.href='../';}};
+bootstrap().catch(error=>notice(error.message,true));
+pollTimer=setInterval(()=>{if(!busy)refreshStatus();},3000);
+</script>
+</body>
+</html>
