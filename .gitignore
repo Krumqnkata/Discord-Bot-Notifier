@@ -4,3 +4,5 @@
 /club_fun.db*
 /.pytest_cache/
 **/__pycache__/
+/youtube-cookies.txt
+/*cookies*.txt
