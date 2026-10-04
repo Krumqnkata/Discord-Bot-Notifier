@@ -194,7 +194,10 @@ class MusicService:
             search_text = await self.spotify_search_text(query)
             return f"ytsearch1:{search_text}", "Spotify → YouTube"
 
-        return query, "YouTube/търсене"
+        if re.match(r"^https?://", query, flags=re.IGNORECASE):
+            return query, "YouTube/линк"
+
+        return f"ytsearch1:{query}", "YouTube/търсене"
 
     async def _run_ydl(self, query: str, *, process: bool, options: dict | None = None) -> dict:
         if not shutil.which("ffmpeg"):
