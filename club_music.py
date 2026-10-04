@@ -30,6 +30,11 @@ POT_PROVIDER_URL = os.getenv(
     "http://127.0.0.1:4416",
 ).strip()
 
+COOKIE_FILE = os.getenv(
+    "MUSIC_YTDLP_COOKIES",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube-cookies.txt"),
+).strip()
+
 YTDLP_OPTIONS = {
     "format": "bestaudio/best",
     "quiet": True,
@@ -39,17 +44,23 @@ YTDLP_OPTIONS = {
     "skip_download": True,
     "extract_flat": False,
     "source_address": "0.0.0.0",
-    # YouTube increasingly requires Proof-of-Origin tokens. The bgutil yt-dlp
-    # plugin talks to the local provider and supplies these automatically.
+    # Keep the PO-token provider available, but let yt-dlp choose the YouTube
+    # client automatically. Account cookies currently work with the default
+    # client selection on this VPS, while forcing mweb can trigger LOGIN_REQUIRED.
     "extractor_args": {
-        "youtube": {
-            "player_client": ["mweb", "tv", "web_safari"],
-        },
         "youtubepot-bgutilhttp": {
             "base_url": [POT_PROVIDER_URL],
         },
     },
 }
+
+if COOKIE_FILE and os.path.isfile(COOKIE_FILE):
+    YTDLP_OPTIONS["cookiefile"] = COOKIE_FILE
+else:
+    log.warning(
+        "Music cookie file not found at %s; YouTube may reject VPS requests",
+        COOKIE_FILE,
+    )
 
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
