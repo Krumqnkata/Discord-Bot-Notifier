@@ -196,34 +196,112 @@ class MusicService:
 
         return query, "YouTube/търсене"
 
-    async def extract(self, query: str) -> dict:
+    async def _run_ydl(self, query: str, *, process: bool, options: dict | None = None) -> dict:
         if not shutil.which("ffmpeg"):
             raise MusicError(
                 "Липсва FFmpeg на сървъра. Инсталирай: sudo apt install ffmpeg"
             )
 
+        opts = dict(YTDLP_OPTIONS)
+        if options:
+            opts.update(options)
+
         def do_extract():
-            with yt_dlp.YoutubeDL(YTDLP_OPTIONS) as ydl:
-                return ydl.extract_info(query, download=False)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(
+                    query,
+                    download=False,
+                    process=process,
+                )
 
         try:
             info = await asyncio.wait_for(asyncio.to_thread(do_extract), timeout=30)
         except asyncio.TimeoutError as exc:
             raise MusicError("Търсенето отне твърде дълго. Опитай пак.") from exc
         except Exception as exc:
-            log.warning("yt-dlp lookup failed for %r: %s", query, exc)
+            log.warning(
+                "yt-dlp lookup failed for %r (process=%s): %s",
+                query,
+                process,
+                exc,
+            )
             raise MusicError(
                 "Не успях да намеря или отворя този аудио източник."
             ) from exc
 
-        if info and "entries" in info:
-            entries = [entry for entry in (info.get("entries") or []) if entry]
-            info = entries[0] if entries else None
-
         if not info:
             raise MusicError("Няма намерен резултат.")
+        return info
+
+    async def extract_search_result(self, query: str) -> dict:
+        """Resolve ytsearch without processing the selected video's formats."""
+        info = await self._run_ydl(
+            query,
+            process=True,
+            options={
+                "extract_flat": "in_playlist",
+                "playlistend": 1,
+            },
+        )
+
+        entries = [entry for entry in (info.get("entries") or []) if entry]
+        if not entries:
+            raise MusicError("Няма намерен резултат.")
+
+        entry = entries[0]
+        url = entry.get("webpage_url") or entry.get("url")
+
+        # Flat YouTube search entries can expose only the video ID in url.
+        if (
+            url
+            and not str(url).startswith(("http://", "https://"))
+            and (entry.get("extractor_key") == "Youtube" or entry.get("ie_key") == "Youtube")
+        ):
+            url = f"https://www.youtube.com/watch?v={url}"
+
+        if not url:
+            raise MusicError("Търсенето не върна използваем линк.")
+
+        return await self.extract_raw(str(url))
+
+    async def extract_raw(self, query: str) -> dict:
+        """Extract raw media metadata without yt-dlp format selection."""
+        info = await self._run_ydl(
+            query,
+            process=False,
+            options={
+                "extract_flat": False,
+            },
+        )
+
+        # Resolve URL indirections manually while still avoiding format selection.
+        for _ in range(3):
+            if not isinstance(info, dict):
+                break
+
+            result_type = info.get("_type")
+            if result_type not in {"url", "url_transparent"}:
+                break
+
+            next_url = info.get("url")
+            if not next_url:
+                break
+
+            info = await self._run_ydl(
+                str(next_url),
+                process=False,
+                options={"extract_flat": False},
+            )
+
+        if not isinstance(info, dict):
+            raise MusicError("Източникът върна неочакван резултат.")
 
         return info
+
+    async def extract(self, query: str) -> dict:
+        if query.startswith(("ytsearch:", "ytsearch1:", "ytsearch2:", "ytsearch3:")):
+            return await self.extract_search_result(query)
+        return await self.extract_raw(query)
 
     async def track_from_query(
         self,
