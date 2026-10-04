@@ -122,5 +122,6 @@ def install_admin(main, store):
     main.HTML_TEMPLATE = main.HTML_TEMPLATE.replace(marker, marker + '''
       <nav class="glass rounded-xl px-4 py-3 flex gap-4" aria-label="Раздели">
         <span class="text-slate-300">📅 Сбирки</span>
-        <a href="fun/" class="text-indigo-300 hover:text-white">🎙 Забавни команди и история →</a>
+        <a href="fun/" class="text-indigo-300 hover:text-white">🎙 Забавни команди</a>
+        <a href="music/" class="text-indigo-300 hover:text-white">🎵 Музика →</a>
       </nav>''', 1)
