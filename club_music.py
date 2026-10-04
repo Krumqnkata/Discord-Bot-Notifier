@@ -36,8 +36,8 @@ COOKIE_FILE = os.getenv(
 ).strip()
 
 YTDLP_OPTIONS = {
-    # Prefer YouTube Opus audio, then M4A, without selecting a video stream.
-    "format": "251/250/249/140/bestaudio",
+    # Prefer the best format that contains audio. It may also contain video; FFmpeg drops video with -vn.
+    "format": "bestaudio*/best",
     "quiet": True,
     "no_warnings": True,
     "noplaylist": True,
